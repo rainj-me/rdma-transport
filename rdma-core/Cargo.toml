@@ -1,0 +1,10 @@
+[package]
+name = "rdma-core"
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rdma-core-sys = { path="../rdma-core-sys" }
+libc = "0"
+thiserror = "1"

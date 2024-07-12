@@ -1,0 +1,13 @@
+[package]
+name = "rdma-transport"
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rdma-core-sys = { path = "../rdma-core-sys" }
+rdma-core = { path = "../rdma-core" }
+libc = "0"
+anyhow = "1"
+os_socketaddr = "0"
+bytes = "1"

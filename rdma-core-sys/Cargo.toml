@@ -1,0 +1,11 @@
+[package]
+name = "rdma-core-sys"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = "0"
+
+[build-dependencies]
+bindgen = "0.69.4"

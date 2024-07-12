@@ -1,0 +1,7 @@
+[workspace.package]
+authors = ["Rain Jiang"]
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = [ "rdma-core","rdma-core-sys", "rdma-transport"]
