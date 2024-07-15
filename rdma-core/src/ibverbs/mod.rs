@@ -1,3 +1,5 @@
 mod verbs;
 
-pub use verbs::{ibv_poll_cq, ibv_post_send, ibv_post_recv};
+pub use verbs::{
+    ibv_modify_qp, ibv_poll_cq, ibv_post_recv, ibv_post_send, ibv_query_qp, ibv_reg_mr,
+};
