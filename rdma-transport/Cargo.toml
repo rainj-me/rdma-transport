@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 rdma-core-sys = { path = "../rdma-core-sys" }
 rdma-core = { path = "../rdma-core" }
+cuda-sys = { path = "../cuda-sys" }
 libc = "0"
 anyhow = "1"
 os_socketaddr = "0"

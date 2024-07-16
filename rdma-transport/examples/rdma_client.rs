@@ -1,8 +1,13 @@
-use std::net::SocketAddr;
 use std::time::Instant;
+use std::{net::SocketAddr, ptr::null_mut, slice};
 
 use anyhow::{anyhow, Result};
 use os_socketaddr::OsSocketAddr;
+
+use cuda_sys::{
+    cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuInit, cuMemAlloc_v2, cuMemcpyHtoD_v2,
+    CUDA_SUCCESS, CU_CTX_MAP_HOST,
+};
 
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_reg_mr},
@@ -21,12 +26,41 @@ use rdma_transport::rdma::{Connection, Notification, RdmaDev};
 const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn main() -> Result<()> {
-    let mut src_addr: OsSocketAddr = "192.168.14.224:33457"
+    let ret = unsafe { cuInit(0) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("init error"));
+    }
+
+    let mut cu_dev = 0;
+    let ret = unsafe { cuDeviceGet(&mut cu_dev, 4) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot get cuda device"));
+    }
+
+    let mut cu_ctx = null_mut();
+    let ret = unsafe { cuCtxCreate_v2(&mut cu_ctx, CU_CTX_MAP_HOST, cu_dev) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot create cuda ctx"));
+    }
+
+    let ret = unsafe { cuCtxSetCurrent(cu_ctx) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot set cuda ctx"));
+    }
+
+    let mut cu_mem_ptr: u64 = 0;
+    let ret = unsafe { cuMemAlloc_v2(&mut cu_mem_ptr, BUFFER_SIZE) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot allocate mem "));
+    }
+    let mut buffer = unsafe { slice::from_raw_parts_mut(cu_mem_ptr as *mut u8, BUFFER_SIZE) };
+
+    let mut src_addr: OsSocketAddr = "192.168.0.2:23457"
         .parse::<SocketAddr>()
         .map(|addr| addr.into())
         .unwrap();
 
-    let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+    // let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
 
     let mut rdma_dev = RdmaDev::default();
     let mut hints = rdma_addrinfo::default();
@@ -34,7 +68,7 @@ pub fn main() -> Result<()> {
     hints.ai_src_addr = src_addr.as_mut_ptr();
     hints.ai_src_len = src_addr.len();
 
-    let addr_info = rdma_getaddrinfo("192.168.14.224", "23456", &hints)?;
+    let addr_info = rdma_getaddrinfo("192.168.0.1", "23456", &hints)?;
     rdma_dev.addr_info = Some(addr_info);
 
     let mut qp_init_attr = ibv_qp_init_attr::default();
@@ -106,15 +140,21 @@ pub fn main() -> Result<()> {
         ));
     }
 
-    let msg = "Hello, RDMA!".as_bytes();
+    let msg = "Hello, RDMA! The voice echoed through the dimly lit control room. The array of monitors flickered to life, displaying a mesmerizing array of data streams, holographic charts, and real-time simulations. Sitting at the central console was Dr. Elara Hinton, a leading expert in quantum computing and neural networks.".as_bytes();
+
+    let ret = unsafe {
+        cuMemcpyHtoD_v2(
+            buffer.as_mut_ptr() as u64,
+            msg.as_ptr() as *const std::ffi::c_void,
+            msg.len(),
+        )
+    };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("memcopy h2d error"));
+    }
 
     let count = 1024 * 1024;
     let iterations = 10000;
-    for i in 0..count {
-        unsafe {
-            *buffer.as_mut_ptr().add(i) = msg[i % msg.len()] as u8;
-        }
-    }
 
     let start = Instant::now();
     for _ in 0..iterations {

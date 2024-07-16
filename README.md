@@ -13,6 +13,12 @@ git submodule update --recursive
 
 - install clang/llvm
 - install rust toolchain via [rustup](https://rustup.rs/)
+- set the cuda comput cap environment (or/and set to rust-analyzer server extra env)
+
+```bash
+export CUDA_HOME=/usr/local/cuda
+```
+
 - compile by cargo
 
 ```bash

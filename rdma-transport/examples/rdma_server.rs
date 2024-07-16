@@ -1,6 +1,15 @@
-use anyhow::{anyhow, Result};
+use core::slice;
+use std::ptr::null_mut;
 
+use anyhow::{anyhow, Result};
+use cuda_sys::{
+    cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuInit, cuMemAlloc_v2, cuMemcpyDtoH_v2,
+    CUDA_SUCCESS, CU_CTX_MAP_HOST,
+};
+
+use cuda_sys;
 use libc::AI_PASSIVE;
+
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_query_qp, ibv_reg_mr},
     rdma::{
@@ -18,14 +27,43 @@ use rdma_transport::rdma::{Connection, Notification, RdmaDev};
 const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn main() -> Result<()> {
-    let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+    // let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+
+    let ret = unsafe { cuInit(0) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("init error"));
+    }
+
+    let mut cu_dev = 0;
+    let ret = unsafe { cuDeviceGet(&mut cu_dev, 4) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot get cuda device"));
+    }
+
+    let mut cu_ctx = null_mut();
+    let ret = unsafe { cuCtxCreate_v2(&mut cu_ctx, CU_CTX_MAP_HOST, cu_dev) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot create cuda ctx"));
+    }
+
+    let ret = unsafe { cuCtxSetCurrent(cu_ctx) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot set cuda ctx"));
+    }
+
+    let mut cu_mem_ptr: u64 = 0;
+    let ret = unsafe { cuMemAlloc_v2(&mut cu_mem_ptr, BUFFER_SIZE) };
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("coudnot allocate mem "));
+    }
+    let mut buffer = unsafe { slice::from_raw_parts_mut(cu_mem_ptr as *mut u8, BUFFER_SIZE) };
 
     let mut rdma_dev = RdmaDev::default();
     let mut hints = rdma_addrinfo::default();
     hints.ai_flags = AI_PASSIVE;
     hints.ai_port_space = RDMA_PS_TCP as i32;
 
-    let addr_info = rdma_getaddrinfo("192.168.14.224", "23456", &hints)?;
+    let addr_info = rdma_getaddrinfo("192.168.0.1", "23456", &hints)?;
     rdma_dev.addr_info = Some(addr_info);
 
     let mut qp_init_attr = ibv_qp_init_attr::default();
@@ -124,6 +162,24 @@ pub fn main() -> Result<()> {
             break;
         }
     }
+
+    let mut buffer_cpu: Vec<u8> = vec![0; BUFFER_SIZE];
+
+    println!("before {:?}", &buffer_cpu[0..100]);
+
+    let ret = unsafe {
+        cuMemcpyDtoH_v2(
+            buffer_cpu.as_mut_ptr() as *mut std::ffi::c_void,
+            buffer.as_mut_ptr() as u64,
+            BUFFER_SIZE,
+        )
+    };
+
+    if ret != CUDA_SUCCESS {
+        return Err(anyhow!("memcopy error"));
+    }
+
+    println!("after {:?}", String::from_utf8_lossy(&buffer_cpu[0..100]));
 
     Ok(())
 }
