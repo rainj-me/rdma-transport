@@ -8,6 +8,7 @@ edition.workspace = true
 rdma-core-sys = { path = "../rdma-core-sys" }
 rdma-core = { path = "../rdma-core" }
 cuda-sys = { path = "../cuda-sys" }
+cuda = { path = "../cuda" }
 libc = "0"
 anyhow = "1"
 os_socketaddr = "0"

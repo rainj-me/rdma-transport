@@ -1,0 +1,9 @@
+[package]
+name = "cuda"
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cuda-sys = { path = "../cuda-sys" }
+thiserror = "1"

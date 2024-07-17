@@ -2,11 +2,12 @@ use std::time::Instant;
 use std::{net::SocketAddr, ptr::null_mut, slice};
 
 use anyhow::{anyhow, Result};
+use cuda::cuda_call;
 use os_socketaddr::OsSocketAddr;
 
 use cuda_sys::{
     cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuInit, cuMemAlloc_v2, cuMemcpyHtoD_v2,
-    CUDA_SUCCESS, CU_CTX_MAP_HOST,
+    CU_CTX_MAP_HOST,
 };
 
 use rdma_core::{
@@ -26,39 +27,24 @@ use rdma_transport::rdma::{Connection, Notification, RdmaDev};
 const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn main() -> Result<()> {
-    let ret = unsafe { cuInit(0) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("init error"));
-    }
-
     let mut cu_dev = 0;
-    let ret = unsafe { cuDeviceGet(&mut cu_dev, 4) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot get cuda device"));
-    }
-
     let mut cu_ctx = null_mut();
-    let ret = unsafe { cuCtxCreate_v2(&mut cu_ctx, CU_CTX_MAP_HOST, cu_dev) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot create cuda ctx"));
-    }
-
-    let ret = unsafe { cuCtxSetCurrent(cu_ctx) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot set cuda ctx"));
-    }
-
+    let gpu_ordinal = 0;
     let mut cu_mem_ptr: u64 = 0;
-    let ret = unsafe { cuMemAlloc_v2(&mut cu_mem_ptr, BUFFER_SIZE) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot allocate mem "));
-    }
+    let remote_addr  = "127.0.0.1:23456".parse::<SocketAddr>()?;
+    let local_addr = "127.0.0.2:23457".parse::<SocketAddr>()?;
+    let msg_size = 1024 * 1024;
+    let loops = 10000;
+
+    cuda_call!(cuInit, cuInit(0))?;
+    cuda_call!(cuDeviceGet, cuDeviceGet(&mut cu_dev, gpu_ordinal))?;
+    cuda_call!(cuCtxCreate_v2, cuCtxCreate_v2(&mut cu_ctx, CU_CTX_MAP_HOST, cu_dev))?;
+    cuda_call!(cuCtxSetCurrent, cuCtxSetCurrent(cu_ctx))?;
+    cuda_call!(cuMemAlloc_v2, cuMemAlloc_v2(&mut cu_mem_ptr, BUFFER_SIZE))?;
+
     let mut buffer = unsafe { slice::from_raw_parts_mut(cu_mem_ptr as *mut u8, BUFFER_SIZE) };
 
-    let mut src_addr: OsSocketAddr = "192.168.0.2:23457"
-        .parse::<SocketAddr>()
-        .map(|addr| addr.into())
-        .unwrap();
+    let mut src_addr: OsSocketAddr = local_addr.into();
 
     // let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
 
@@ -68,7 +54,7 @@ pub fn main() -> Result<()> {
     hints.ai_src_addr = src_addr.as_mut_ptr();
     hints.ai_src_len = src_addr.len();
 
-    let addr_info = rdma_getaddrinfo("192.168.0.1", "23456", &hints)?;
+    let addr_info = rdma_getaddrinfo(&remote_addr.ip().to_string(), &remote_addr.port().to_string(), &hints)?;
     rdma_dev.addr_info = Some(addr_info);
 
     let mut qp_init_attr = ibv_qp_init_attr::default();
@@ -120,49 +106,41 @@ pub fn main() -> Result<()> {
 
     let mut wc = ibv_wc::default();
     let send_cq = unsafe { (*cm_id).send_cq };
-    let ret = ibv_poll_cq(send_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
 
     if wc.status != IBV_WC_SUCCESS {
         return Err(anyhow!(
-            "ibv_poll_cq on send_cq failed with errorno: {}",
-            ret
+            "ibv_poll_cq on send_cq failed with status: {:?}",
+            wc.status
         ));
     }
 
     let mut wc = ibv_wc::default();
     let recv_cq = unsafe { (*cm_id).recv_cq };
-    let ret = ibv_poll_cq(recv_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
+    ibv_poll_cq(recv_cq, 1, &mut wc)?;
 
     if wc.status != IBV_WC_SUCCESS {
         return Err(anyhow!(
-            "ibv_poll_cq on recv_cq failed with errorno: {}",
-            ret
+            "ibv_poll_cq on recv_cq failed with status: {:?}",
+            wc.status
         ));
     }
 
     let msg = "Hello, RDMA! The voice echoed through the dimly lit control room. The array of monitors flickered to life, displaying a mesmerizing array of data streams, holographic charts, and real-time simulations. Sitting at the central console was Dr. Elara Hinton, a leading expert in quantum computing and neural networks.".as_bytes();
 
-    let ret = unsafe {
-        cuMemcpyHtoD_v2(
-            buffer.as_mut_ptr() as u64,
-            msg.as_ptr() as *const std::ffi::c_void,
-            msg.len(),
-        )
-    };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("memcopy h2d error"));
-    }
-
-    let count = 1024 * 1024;
-    let iterations = 10000;
+    cuda_call!(cuMemcpyHtoD_v2, cuMemcpyHtoD_v2(
+        buffer.as_mut_ptr() as u64,
+        msg.as_ptr() as *const std::ffi::c_void,
+        msg.len(),
+    ))?;
 
     let start = Instant::now();
-    for _ in 0..iterations {
+    for _ in 0..loops {
         rdma_post_write(
             cm_id,
             &mut 1,
             buffer.as_mut_ptr() as *mut std::ffi::c_void,
-            count,
+            msg_size,
             rdma_dev.recv_mr,
             IBV_SEND_SIGNALED,
             server_conn.addr,
@@ -171,17 +149,17 @@ pub fn main() -> Result<()> {
 
         let mut wc = ibv_wc::default();
         let send_cq = unsafe { (*cm_id).send_cq };
-        let ret = ibv_poll_cq(send_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
+        ibv_poll_cq(send_cq, 1, &mut wc)?;
 
         if wc.status != IBV_WC_SUCCESS {
             return Err(anyhow!(
-                "ibv_poll_cq on recv_cq failed with errorno: {}",
-                ret
+                "ibv_poll_cq on recv_cq failed with status: {:?}",
+                wc.status
             ));
         }
 
         let mut notification = Notification {
-            size: count,
+            size: msg_size,
             done: 0,
         };
 
@@ -196,20 +174,20 @@ pub fn main() -> Result<()> {
 
         let mut wc = ibv_wc::default();
         let send_cq = unsafe { (*cm_id).send_cq };
-        let ret = ibv_poll_cq(send_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
+        ibv_poll_cq(send_cq, 1, &mut wc)?;
 
         if wc.status != IBV_WC_SUCCESS {
             return Err(anyhow!(
-                "ibv_poll_cq on send_cq failed with errorno: {}",
-                ret
+                "ibv_poll_cq on send_cq failed with status: {:?}",
+                wc.status
             ));
         }
     }
     let elapse = start.elapsed().as_millis();
-    let bw = (count as f32 * iterations as f32 * 1000.0) / elapse as f32;
+    let bw = (msg_size as f32 * loops as f32 * 1000.0) / (elapse as f32 * 1024.0 * 1024.0 );
     print!(
-        "pkg size: {}, iterations: {}, duration: {}, bw: {}",
-        count, iterations, elapse, bw
+        "message size: {}, loops: {}, duration: {}, bw: {:.2} MB/s",
+        msg_size, loops, elapse, bw
     );
 
     let mut notification = Notification { size: 0, done: 1 };
@@ -225,12 +203,12 @@ pub fn main() -> Result<()> {
 
     let mut wc = ibv_wc::default();
     let send_cq = unsafe { (*cm_id).send_cq };
-    let ret = ibv_poll_cq(send_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
 
     if wc.status != IBV_WC_SUCCESS {
         return Err(anyhow!(
-            "ibv_poll_cq on send_cq failed with errorno: {}",
-            ret
+            "ibv_poll_cq on send_cq failed with status: {:?}",
+            wc.status
         ));
     }
 

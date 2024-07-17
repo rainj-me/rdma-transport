@@ -1,10 +1,12 @@
 use core::slice;
+use std::net::SocketAddr;
 use std::ptr::null_mut;
 
 use anyhow::{anyhow, Result};
+use cuda::cuda_call;
 use cuda_sys::{
     cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuInit, cuMemAlloc_v2, cuMemcpyDtoH_v2,
-    CUDA_SUCCESS, CU_CTX_MAP_HOST,
+    CU_CTX_MAP_HOST,
 };
 
 use cuda_sys;
@@ -27,43 +29,25 @@ use rdma_transport::rdma::{Connection, Notification, RdmaDev};
 const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn main() -> Result<()> {
-    // let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
-
-    let ret = unsafe { cuInit(0) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("init error"));
-    }
-
     let mut cu_dev = 0;
-    let ret = unsafe { cuDeviceGet(&mut cu_dev, 4) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot get cuda device"));
-    }
-
     let mut cu_ctx = null_mut();
-    let ret = unsafe { cuCtxCreate_v2(&mut cu_ctx, CU_CTX_MAP_HOST, cu_dev) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot create cuda ctx"));
-    }
-
-    let ret = unsafe { cuCtxSetCurrent(cu_ctx) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot set cuda ctx"));
-    }
-
+    let gpu_ordinal = 0;
     let mut cu_mem_ptr: u64 = 0;
-    let ret = unsafe { cuMemAlloc_v2(&mut cu_mem_ptr, BUFFER_SIZE) };
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("coudnot allocate mem "));
-    }
-    let mut buffer = unsafe { slice::from_raw_parts_mut(cu_mem_ptr as *mut u8, BUFFER_SIZE) };
+    let bind_addr  = "127.0.0.1:23456".parse::<SocketAddr>()?;
 
+    cuda_call!(cuInit, cuInit(0))?;
+    cuda_call!(cuDeviceGet, cuDeviceGet(&mut cu_dev, gpu_ordinal))?;
+    cuda_call!(cuCtxCreate_v2, cuCtxCreate_v2(&mut cu_ctx, CU_CTX_MAP_HOST, cu_dev))?;
+    cuda_call!(cuCtxSetCurrent, cuCtxSetCurrent(cu_ctx))?;
+    cuda_call!(cuMemAlloc_v2, cuMemAlloc_v2(&mut cu_mem_ptr, BUFFER_SIZE))?;
+
+    let mut buffer = unsafe { slice::from_raw_parts_mut(cu_mem_ptr as *mut u8, BUFFER_SIZE) };
     let mut rdma_dev = RdmaDev::default();
     let mut hints = rdma_addrinfo::default();
     hints.ai_flags = AI_PASSIVE;
     hints.ai_port_space = RDMA_PS_TCP as i32;
 
-    let addr_info = rdma_getaddrinfo("192.168.0.1", "23456", &hints)?;
+    let addr_info = rdma_getaddrinfo(&bind_addr.ip().to_string(), &bind_addr.port().to_string(), &hints)?;
     rdma_dev.addr_info = Some(addr_info);
 
     let mut qp_init_attr = ibv_qp_init_attr::default();
@@ -112,10 +96,9 @@ pub fn main() -> Result<()> {
 
     let mut wc = ibv_wc::default();
     let recv_cq = unsafe { (*cm_id).recv_cq };
-    let ret = ibv_poll_cq(recv_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
-
+    ibv_poll_cq(recv_cq, 1, &mut wc)?;
     if wc.status != IBV_WC_SUCCESS {
-        return Err(anyhow!("poll_send_comp failed with errorno: {}", ret));
+        return Err(anyhow!("poll_send_comp failed with status: {:?}", wc.status));
     }
 
     let mut conn = Connection {
@@ -134,10 +117,9 @@ pub fn main() -> Result<()> {
 
     let mut wc = ibv_wc::default();
     let send_cq = unsafe { (*cm_id).send_cq };
-    let ret = ibv_poll_cq(send_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
-
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
     if wc.status != IBV_WC_SUCCESS {
-        return Err(anyhow!("poll_send_comp failed with errorno: {}", ret));
+        return Err(anyhow!("poll_send_comp failed with errorno: {:?}", wc.status));
     }
 
     let mut notification = Notification { size: 0, done: 0 };
@@ -153,10 +135,9 @@ pub fn main() -> Result<()> {
 
         let mut wc = ibv_wc::default();
         let recv_cq = unsafe { (*cm_id).recv_cq };
-        let ret = ibv_poll_cq(recv_cq, 1, &mut wc).map_err(|e| anyhow!("{:?}", e))?;
-
+        ibv_poll_cq(recv_cq, 1, &mut wc)?;
         if wc.status != IBV_WC_SUCCESS {
-            return Err(anyhow!("poll_recv_comp failed with errorno: {}", ret));
+            return Err(anyhow!("poll_recv_comp failed with errorno: {:?}", wc.status));
         }
         if notification.done > 0 {
             break;
@@ -167,17 +148,11 @@ pub fn main() -> Result<()> {
 
     println!("before {:?}", &buffer_cpu[0..100]);
 
-    let ret = unsafe {
-        cuMemcpyDtoH_v2(
-            buffer_cpu.as_mut_ptr() as *mut std::ffi::c_void,
-            buffer.as_mut_ptr() as u64,
-            BUFFER_SIZE,
-        )
-    };
-
-    if ret != CUDA_SUCCESS {
-        return Err(anyhow!("memcopy error"));
-    }
+    cuda_call!(cuMemcpyDtoH_v2, cuMemcpyDtoH_v2(
+        buffer_cpu.as_mut_ptr() as *mut std::ffi::c_void,
+        buffer.as_mut_ptr() as u64,
+        BUFFER_SIZE,
+    ))?;
 
     println!("after {:?}", String::from_utf8_lossy(&buffer_cpu[0..100]));
 

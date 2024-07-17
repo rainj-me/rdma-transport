@@ -1,13 +1,13 @@
 use std::{ffi::c_void, ptr::null_mut};
 
 use rdma_core_sys::{
-    ibv_cq, ibv_mr, ibv_pd, ibv_qp, ibv_qp_attr, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr, ibv_wc
+    ibv_cq, ibv_mr, ibv_pd, ibv_qp, ibv_qp_attr, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr, ibv_wc,
 };
 
-use crate::{RdmaErrors, Result};
+use crate::{macros::rdma_call, RdmaErrors, Result};
 
 pub fn ibv_poll_cq(cq: *mut ibv_cq, num_entries: i32, wc: &mut ibv_wc) -> Result<i32> {
-    let ret = unsafe {
+    let entries = unsafe {
         let ops = (*(*cq).context).ops;
         let poll_cq = ops
             .poll_cq
@@ -19,10 +19,11 @@ pub fn ibv_poll_cq(cq: *mut ibv_cq, num_entries: i32, wc: &mut ibv_wc) -> Result
             }
         }
     };
-    return if ret > 0 {
-        Ok(ret)
+
+    return if entries > 0 {
+        Ok(entries)
     } else {
-        Err(RdmaErrors::OpsFailed("ibv_poll_cq".to_string(), ret))
+        Err(RdmaErrors::OpsFailed("ibv_poll_cq".to_string(), entries))
     };
 }
 
@@ -51,19 +52,10 @@ pub fn ibv_post_send(
     wr: *mut ibv_send_wr,
     bad: *mut *mut ibv_send_wr,
 ) -> Result<()> {
-    let ret = unsafe {
-        let ops = (*(*qp).context).ops;
-        let post_send = ops
-            .post_send
-            .ok_or(RdmaErrors::OpsNotFound("ibv_post_send".to_string()))?;
-        post_send(qp, wr, bad)
-    };
+    let post_send = unsafe { (*(*qp).context).ops.post_send }
+        .ok_or(RdmaErrors::OpsNotFound("ibv_post_send".to_string()))?;
 
-    return if ret == 0 {
-        Ok(())
-    } else {
-        Err(RdmaErrors::OpsFailed("ibv_post_send".to_string(), ret))
-    };
+    rdma_call!(ibv_post_send, post_send(qp, wr, bad))
 }
 
 pub fn ibv_query_qp(
@@ -74,29 +66,22 @@ pub fn ibv_query_qp(
 ) -> Result<()> {
     let init_attr = init_attr.unwrap_or(&mut ibv_qp_init_attr::default());
 
-    let ret = unsafe { rdma_core_sys::ibv_query_qp(qp, attr, attr_mask, init_attr) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(RdmaErrors::OpsFailed("ibv_query_qp".to_string(), ret))
-    }
+    rdma_call!(
+        ibv_query_qp,
+        rdma_core_sys::ibv_query_qp(qp, attr, attr_mask, init_attr)
+    )
 }
 
 pub fn ibv_modify_qp(qp: *mut ibv_qp, attr: *mut ibv_qp_attr, attr_mask: i32) -> Result<()> {
-    let ret = unsafe { rdma_core_sys::ibv_modify_qp(qp, attr, attr_mask) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(RdmaErrors::OpsFailed("ibv_modify_qp".to_string(), ret))
-    }
+    rdma_call!(
+        ibv_modify_qp,
+        rdma_core_sys::ibv_modify_qp(qp, attr, attr_mask)
+    )
 }
-
 
 pub fn ibv_reg_mr(pd: *mut ibv_pd, buffer: &mut [u8], access: i32) -> Result<*mut ibv_mr> {
     let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
-    let mr = unsafe {
-        rdma_core_sys::ibv_reg_mr(pd, buffer_ptr, buffer.len(), access)
-    };
+    let mr = unsafe { rdma_core_sys::ibv_reg_mr(pd, buffer_ptr, buffer.len(), access) };
     if mr != null_mut() {
         Ok(mr)
     } else {
