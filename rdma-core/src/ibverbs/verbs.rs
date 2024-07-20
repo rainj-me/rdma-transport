@@ -1,10 +1,12 @@
 use std::{ffi::c_void, ptr::null_mut};
 
 use rdma_core_sys::{
-    ibv_cq, ibv_mr, ibv_pd, ibv_qp, ibv_qp_attr, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr, ibv_wc,
+    ibv_cq, ibv_pd, ibv_qp, ibv_qp_attr, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr, ibv_wc,
 };
 
 use crate::{macros::rdma_call, RdmaErrors, Result};
+
+use super::IbvMr;
 
 pub fn ibv_poll_cq(cq: *mut ibv_cq, num_entries: i32, wc: &mut ibv_wc) -> Result<i32> {
     let entries = unsafe {
@@ -32,19 +34,10 @@ pub fn ibv_post_recv(
     wr: *mut ibv_recv_wr,
     bad: *mut *mut ibv_recv_wr,
 ) -> Result<()> {
-    let ret = unsafe {
-        let ops = (*(*qp).context).ops;
-        let post_recv = ops
-            .post_recv
-            .ok_or(RdmaErrors::OpsNotFound("ibv_post_recv".to_string()))?;
-        post_recv(qp, wr, bad)
-    };
+    let post_recv = unsafe { (*(*qp).context).ops.post_recv }
+        .ok_or(RdmaErrors::OpsNotFound("ibv_post_recv".to_string()))?;
 
-    return if ret == 0 {
-        Ok(())
-    } else {
-        Err(RdmaErrors::OpsFailed("ibv_post_recv".to_string(), ret))
-    };
+    rdma_call!(ibv_post_recv, post_recv(qp, wr, bad))
 }
 
 pub fn ibv_post_send(
@@ -79,11 +72,11 @@ pub fn ibv_modify_qp(qp: *mut ibv_qp, attr: *mut ibv_qp_attr, attr_mask: i32) ->
     )
 }
 
-pub fn ibv_reg_mr(pd: *mut ibv_pd, buffer: &mut [u8], access: i32) -> Result<*mut ibv_mr> {
+pub fn ibv_reg_mr(pd: *mut ibv_pd, buffer: &mut [u8], access: i32) -> Result<IbvMr> {
     let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
     let mr = unsafe { rdma_core_sys::ibv_reg_mr(pd, buffer_ptr, buffer.len(), access) };
     if mr != null_mut() {
-        Ok(mr)
+        Ok(mr.into())
     } else {
         Err(RdmaErrors::OpsFailed("ibv_reg_mr".to_string(), -1))
     }

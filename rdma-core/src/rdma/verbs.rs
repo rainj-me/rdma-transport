@@ -1,68 +1,84 @@
-use rdma_core_sys::{
-    ibv_mr, ibv_recv_wr, ibv_send_wr, ibv_sge, rdma_cm_id, IBV_WR_RDMA_WRITE, IBV_WR_SEND,
-};
-use std::ptr;
+use rdma_core_sys::{ibv_recv_wr, ibv_send_wr, ibv_sge, IBV_WR_RDMA_WRITE, IBV_WR_SEND};
+use std::ptr::{self, null_mut};
 
-use crate::ibverbs::{ibv_post_recv, ibv_post_send};
-use crate::Result;
+use crate::ibverbs::{ibv_post_recv, ibv_post_send, IbvMr};
+use crate::{rdma::RdmaCmId, Result};
 
 pub fn rdma_post_send<Context, Addr>(
-    id: *mut rdma_cm_id,
-    context: *mut Context,
-    addr: *mut Addr,
+    id: &mut RdmaCmId,
+    context: Option<&mut Context>,
+    addr: &mut Addr,
     length: usize,
-    mr: Option<*mut ibv_mr>,
+    mr: Option<&mut IbvMr>,
     flags: u32,
 ) -> Result<()> {
     let mut sge = ibv_sge::default();
-    sge.addr = addr as u64;
+    sge.addr = addr as *mut _ as u64;
     sge.length = length as u32;
-    sge.lkey = mr.map(|mr| unsafe { (*mr).lkey }).unwrap_or(0);
+    sge.lkey = mr.map(|mr| mr.lkey).unwrap_or(0);
 
+    rdma_post_sendv(id, context, &mut sge, 1, flags)
+}
+
+pub fn rdma_post_sendv<Context>(
+    id: &mut RdmaCmId,
+    context: Option<&mut Context>,
+    sgl: *mut ibv_sge,
+    nsge: i32,
+    flags: u32,
+) -> Result<()> {
     let mut wr = ibv_send_wr::default();
-    wr.wr_id = context as u64;
+    wr.wr_id = context.map(|v| v as *mut _).unwrap_or(null_mut()) as u64;
     wr.next = ptr::null_mut();
-    wr.sg_list = &mut sge;
-    wr.num_sge = 1;
+    wr.sg_list = sgl;
+    wr.num_sge = nsge;
     wr.opcode = IBV_WR_SEND;
     wr.send_flags = flags as u32;
 
     let mut bad: *mut ibv_send_wr = &mut ibv_send_wr::default();
 
-    let qp = unsafe { (*id).qp };
-    ibv_post_send(qp, &mut wr, &mut bad)
+    ibv_post_send(id.qp, &mut wr, &mut bad)
 }
 
 pub fn rdma_post_recv<Context, Addr>(
-    id: *mut rdma_cm_id,
-    context: *mut Context,
+    id: &mut RdmaCmId,
+    context: Option<&mut Context>,
     addr: *mut Addr,
     length: usize,
-    mr: *mut ibv_mr,
+    mr: &mut IbvMr,
 ) -> Result<()> {
     let mut sge = ibv_sge::default();
     sge.addr = addr as u64;
     sge.length = length as u32;
-    sge.lkey = unsafe { (*mr).lkey };
+    sge.lkey = mr.lkey;
 
+    rdma_post_recvv(id, context, &mut sge, 1)
+}
+
+pub fn rdma_post_recvv<Context>(
+    id: &mut RdmaCmId,
+    context: Option<&mut Context>,
+    sgl: *mut ibv_sge,
+    nsge: i32,
+) -> Result<()> {
     let mut wr = ibv_recv_wr::default();
-    wr.wr_id = context as u64;
+    wr.wr_id = context.map(|v| v as *mut _).unwrap_or(null_mut()) as u64;
     wr.next = ptr::null_mut();
-    wr.sg_list = &mut sge;
-    wr.num_sge = 1;
+    wr.sg_list = sgl;
+    wr.num_sge = nsge;
 
     let mut bad: *mut ibv_recv_wr = &mut ibv_recv_wr::default();
 
-    let qp = unsafe { (*id).qp };
+    let qp = id.qp;
     ibv_post_recv(qp, &mut wr, &mut bad)
 }
 
 pub fn rdma_post_write<Context, Addr>(
-    id: *mut rdma_cm_id,
-    context: *mut Context,
+    id: &mut RdmaCmId,
+    context: Option<&mut Context>,
     addr: *mut Addr,
     length: usize,
-    mr: Option<*mut ibv_mr>,
+    mr: Option<&mut IbvMr>,
     flags: u32,
     remote_addr: u64,
     rkey: u32,
@@ -70,13 +86,25 @@ pub fn rdma_post_write<Context, Addr>(
     let mut sge = ibv_sge::default();
     sge.addr = addr as u64;
     sge.length = length as u32;
-    sge.lkey = mr.map(|mr| unsafe { (*mr).lkey }).unwrap_or(0);
+    sge.lkey = mr.map(|mr| mr.lkey).unwrap_or(0);
 
+    rdma_post_writev(id, context, &mut sge, 1, flags, remote_addr, rkey)
+}
+
+pub fn rdma_post_writev<Context>(
+    id: &mut RdmaCmId,
+    context: Option<&mut Context>,
+    sgl: *mut ibv_sge,
+    nsge: i32,
+    flags: u32,
+    remote_addr: u64,
+    rkey: u32,
+) -> Result<()> {
     let mut wr = ibv_send_wr::default();
-    wr.wr_id = context as u64;
+    wr.wr_id = context.map(|v| v as *mut _).unwrap_or(null_mut()) as u64;
     wr.next = ptr::null_mut();
-    wr.sg_list = &mut sge;
-    wr.num_sge = 1;
+    wr.sg_list = sgl;
+    wr.num_sge = nsge;
     wr.opcode = IBV_WR_RDMA_WRITE;
     wr.send_flags = flags;
     wr.wr.rdma.remote_addr = remote_addr;
@@ -84,6 +112,6 @@ pub fn rdma_post_write<Context, Addr>(
 
     let mut bad: *mut ibv_send_wr = &mut ibv_send_wr::default();
 
-    let qp = unsafe { (*id).qp };
+    let qp = id.qp;
     ibv_post_send(qp, &mut wr, &mut bad)
 }
