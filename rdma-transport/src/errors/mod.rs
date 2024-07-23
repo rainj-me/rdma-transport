@@ -8,6 +8,8 @@ pub enum TransportErrors {
     RdmaErrors(RdmaErrors),
     #[error("Cuda error: {0}")]
     CudaErrors(CudaErrors),
+    #[error("ops {0} failed with msg {1} ")]
+    OpsFailed(String, String),
 }
 
 impl From<RdmaErrors> for TransportErrors {

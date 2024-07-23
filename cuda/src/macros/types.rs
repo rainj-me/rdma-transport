@@ -1,4 +1,4 @@
-macro_rules! rdma_type {
+macro_rules! cuda_type {
     ($wrapper_name: ident, $inner_type:ty) => {
         #[allow(non_snake_case)]
         pub mod $wrapper_name {
@@ -8,7 +8,7 @@ macro_rules! rdma_type {
                 rc::Rc,
             };
             
-            #[derive(Default)]
+            #[derive(Debug, Clone)]
             struct Inner(Box<$inner_type>);
 
             #[derive(Debug, Clone)]
@@ -44,14 +44,6 @@ macro_rules! rdma_type {
                 }
             }
 
-            impl Default for $wrapper_name {
-                fn default() -> $wrapper_name {
-                    $wrapper_name{
-                        inner: Rc::new(UnsafeCell::new(Default::default()))
-                    }
-                }
-            }
-
             unsafe impl Send for $wrapper_name {}
             unsafe impl Send for Inner {}
 
@@ -59,4 +51,4 @@ macro_rules! rdma_type {
     }
 }
 
-pub(crate)  use rdma_type;
+pub(crate)  use cuda_type;

@@ -1,6 +1,12 @@
 use rdma_core::{ibverbs::IbvMr, rdma::{RdmaAddrInfo, RdmaCmId}};
 use rdma_core_sys::ibv_send_flags;
 
+mod server;
+pub use server::serve;
+mod client;
+pub use client::connect;
+
+
 #[derive(Clone, Default)]
 pub struct RdmaDev {
     pub cm_id: Option<RdmaCmId>,

@@ -1,11 +1,9 @@
 use std::{
     ops::{Deref, DerefMut},
-    ptr, slice,
+    slice,
 };
 
-use cuda::cuda_call;
-use cuda_sys::cuMemFree_v2;
-
+#[derive(Debug, Clone, Copy)]
 pub struct CudaMemBuffer {
     ptr: u64,
     size: usize,
@@ -35,13 +33,5 @@ impl Deref for CudaMemBuffer {
 impl DerefMut for CudaMemBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { slice::from_raw_parts_mut(self.ptr as *mut u8, self.size) }
-    }
-}
-
-impl Drop for CudaMemBuffer {
-    fn drop(&mut self) {
-        if self.ptr as *mut u8 != ptr::null_mut() {
-            let _ = cuda_call!(cuMemFree, cuMemFree_v2(self.ptr));
-        }
     }
 }
