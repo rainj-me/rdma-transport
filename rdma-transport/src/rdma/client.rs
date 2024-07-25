@@ -14,18 +14,18 @@ use rdma_core_sys::{
     IBV_QP_ACCESS_FLAGS, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP,
 };
 
-use crate::{cuda::CudaMemBuffer, Result, TransportErrors};
+use crate::{
+    cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx, CudaMemBuffer},
+    Result, TransportErrors,
+};
 
 use super::Connection;
 
-pub fn connect(
-    server_addr: SocketAddr,
-    local_addr: SocketAddr,
-    buffer: &mut CudaMemBuffer,
-) -> Result<(RdmaCmId, IbvMr, Connection)> {
+const BUFFER_SIZE: usize = 16 * 1024 * 1024;
+
+pub fn init(server_addr: SocketAddr, local_addr: SocketAddr) -> Result<RdmaCmId> {
     let mut src_addr: OsSocketAddr = local_addr.into();
 
-    // let mut rdma_dev = RdmaDev::default();
     let mut hints = RdmaAddrInfo::default();
     hints.ai_port_space = RDMA_PS_TCP as i32;
     hints.ai_src_addr = src_addr.as_mut_ptr();
@@ -36,7 +36,6 @@ pub fn connect(
         &server_addr.port().to_string(),
         &hints,
     )?;
-    // rdma_dev.addr_info = Some(addr_info.clone());
 
     let mut qp_init_attr = IbvQpInitAttr::default();
     qp_init_attr.cap.max_send_wr = 1;
@@ -45,10 +44,14 @@ pub fn connect(
     qp_init_attr.cap.max_recv_sge = 1;
     qp_init_attr.cap.max_inline_data = 16;
     qp_init_attr.sq_sig_all = 1;
-    let mut cm_id = rdma_create_ep(&mut addr_info, None, Some(&mut qp_init_attr))?;
+    let cm_id = rdma_create_ep(&mut addr_info, None, Some(&mut qp_init_attr))?;
+    Ok(cm_id)
+}
 
-    // rdma_dev.cm_id = Some(cm_id.clone());
-    // rdma_dev.send_flags = IBV_SEND_INLINE;
+pub fn connect(
+    cm_id: &mut RdmaCmId,
+    gpu_ordinal: i32,
+) -> Result<(IbvMr, CudaMemBuffer, Connection)> {
     let qp = cm_id.qp;
     let pd = cm_id.pd;
 
@@ -56,21 +59,22 @@ pub fn connect(
     mod_attr.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
     ibv_modify_qp(qp, &mut mod_attr, IBV_QP_ACCESS_FLAGS as i32)?;
 
-    let mut mr = ibv_reg_mr(pd, buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
-    // rdma_dev.recv_mr = Some(mr.clone());
+    let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
+    cuda_set_current_ctx(&mut cu_ctx)?;
+    let mut buffer: CudaMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+    let mut mr = ibv_reg_mr(pd, &mut buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
 
     let mut conn_server_info = Connection { addr: 0, rkey: 0 };
 
     rdma_post_recv(
-        &mut cm_id,
+        cm_id,
         None::<&mut u32>,
         &mut conn_server_info,
         std::mem::size_of::<Connection>(),
-        // rdma_dev.recv_mr.as_mut().unwrap(),
         &mut mr,
     )?;
 
-    rdma_connect(&mut cm_id, None)?;
+    rdma_connect(cm_id, None)?;
 
     let mut conn_client_info = Connection {
         addr: buffer.as_mut_ptr() as u64,
@@ -78,7 +82,7 @@ pub fn connect(
     };
 
     rdma_post_send(
-        &mut cm_id,
+        cm_id,
         None::<&mut u32>,
         &mut conn_client_info,
         std::mem::size_of::<Connection>(),
@@ -108,5 +112,5 @@ pub fn connect(
         ));
     }
 
-    Ok((cm_id, mr, conn_server_info))
+    Ok((mr, buffer, conn_server_info))
 }

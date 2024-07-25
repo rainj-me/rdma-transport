@@ -1,4 +1,4 @@
-use std::{ffi::c_void, ptr::null_mut};
+use std::{ffi::c_void, ops::DerefMut, ptr::null_mut};
 
 use rdma_core_sys::{
     ibv_cq, ibv_pd, ibv_qp, ibv_qp_attr, ibv_qp_init_attr, ibv_recv_wr, ibv_send_wr, ibv_wc,
@@ -80,4 +80,12 @@ pub fn ibv_reg_mr(pd: *mut ibv_pd, buffer: &mut [u8], access: i32) -> Result<Ibv
     } else {
         Err(RdmaErrors::OpsFailed("ibv_reg_mr".to_string(), -1))
     }
+}
+
+pub fn ibv_dereg_mr(mr: &mut IbvMr) -> Result<()> {
+    let mr = mr.deref_mut() as *mut _;
+    if mr == null_mut() {
+        return Ok(());
+    }
+    rdma_call!(ibv_dereg_mr, rdma_core_sys::ibv_dereg_mr(mr))
 }

@@ -1,3 +1,5 @@
-mod daemon;
+mod server;
+mod client;
 
-pub use daemon::DaemonThread;
+pub use server::RdmaServer;
+pub use client::RdmaClient;

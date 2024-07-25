@@ -1,23 +1,37 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use rdma_transport::cuda::{cuda_init_ctx, cuda_mem_alloc, cuda_mem_free, cuda_set_current_ctx};
-use rdma_transport::rdma::serve;
-
-const BUFFER_SIZE: usize = 16 * 1024 * 1024;
+use rdma_transport::cuda::cuda_init_ctx;
+use rdma_transport::rdma;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    let bind_addr = "192.168.14.224:23456".parse::<SocketAddr>()?;
+    let bind_addr = "192.168.14.224:23457".parse::<SocketAddr>()?;
     let gpu_ordinal = 4;
 
-    let cu_ctx = cuda_init_ctx(gpu_ordinal)?;
-    // cuda_set_current_ctx(&mut cu_ctx)?;
-    // let buffer = cuda_mem_alloc(BUFFER_SIZE)?;
-    
-    let _ = serve(bind_addr, cu_ctx).await;
+    let _ = cuda_init_ctx(gpu_ordinal)?;
+    let mut listen_id = rdma::server_init(&bind_addr)?;
 
-    // cuda_mem_free(&buffer)?;
+    while let Ok(mut cm_id) = rdma::accept(&mut listen_id).await {
+        tokio::spawn(async move {
+            match rdma::handshake(&mut cm_id, gpu_ordinal).await {
+                Ok((mut mr, mut buffer, _conn)) => loop {
+                    let notification = rdma::handle_notification(&mut cm_id, &mut mr)
+                        .await
+                        .unwrap();
+                    println!("notifcation: {:?}", notification);
+                    if notification.done > 0 {
+                        rdma::deregister_mr(&mut mr, &mut buffer).unwrap();
+                        break;
+                    }
+                },
+                Err(e) => {
+                    println!("exchange qp failed: {:?}", e);
+                }
+            };
+            rdma::disconnect(&mut cm_id).unwrap();
+        });
+    }
 
     Ok(())
 }

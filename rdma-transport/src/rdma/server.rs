@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
 
-use cuda::CuCtx;
 use libc::AI_PASSIVE;
 
 use rdma_core::ibverbs::{IbvMr, IbvQpInitAttr};
-use rdma_core::rdma::{rdma_disconnect, RdmaAddrInfo, RdmaCmId};
+use rdma_core::rdma::{RdmaAddrInfo, RdmaCmId};
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_query_qp, ibv_reg_mr},
     rdma::{
@@ -17,14 +16,16 @@ use rdma_core_sys::{
     IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP,
 };
 
-use crate::cuda::{cuda_mem_alloc, cuda_mem_free, cuda_set_current_ctx, CudaMemBuffer};
+use crate::cuda::{
+    cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx, CudaMemBuffer,
+};
 use crate::{Result, TransportErrors};
 
 use super::{Connection, Notification};
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
-pub async fn serve(bind_addr: SocketAddr, cu_ctx: CuCtx) -> Result<()> {
+pub fn init(bind_addr: &SocketAddr) -> Result<RdmaCmId> {
     let mut hints = RdmaAddrInfo::default();
     hints.ai_flags = AI_PASSIVE;
     hints.ai_port_space = RDMA_PS_TCP as i32;
@@ -45,26 +46,17 @@ pub async fn serve(bind_addr: SocketAddr, cu_ctx: CuCtx) -> Result<()> {
     let mut listen_id = rdma_create_ep(&mut addr_info, None, Some(&mut qp_init_attr))?;
 
     rdma_listen(&mut listen_id, 0)?;
-
-    loop {
-        let cm_id = rdma_get_request(&mut listen_id)?;
-        let mut cu_ctx = cu_ctx.clone();
-        tokio::spawn(async move {
-            cuda_set_current_ctx(&mut cu_ctx).unwrap();
-            let buffer: CudaMemBuffer = cuda_mem_alloc(BUFFER_SIZE).unwrap();
-            let mut cm_id = cm_id;
-            let mut buffer = buffer;
-            let (mut mr, mut conn) = accept(&mut cm_id, &mut buffer).await.unwrap();
-            handle_request(&mut cm_id, &mut mr, &mut conn)
-                .await
-                .unwrap();
-            print_msg(&buffer).await.unwrap();
-            cuda_mem_free(&buffer).unwrap();
-        });
-    }
+    Ok(listen_id)
 }
 
-async fn accept(cm_id: &mut RdmaCmId, buffer: &mut CudaMemBuffer) -> Result<(IbvMr, Connection)> {
+pub async fn accept(listen_id: &mut RdmaCmId) -> Result<RdmaCmId> {
+    rdma_get_request(listen_id).map_err(|e| e.into())
+}
+
+pub async fn handshake(
+    cm_id: &mut RdmaCmId,
+    gpu_ordinal: i32,
+) -> Result<(IbvMr, CudaMemBuffer, Connection)> {
     let qp = cm_id.qp;
     ibv_query_qp(qp, &mut ibv_qp_attr::default(), IBV_QP_CAP as i32, None)?;
 
@@ -74,7 +66,12 @@ async fn accept(cm_id: &mut RdmaCmId, buffer: &mut CudaMemBuffer) -> Result<(Ibv
 
     let access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
     let pd = cm_id.pd;
-    let mut mr = ibv_reg_mr(pd, buffer, access as i32)?;
+
+    let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
+    cuda_set_current_ctx(&mut cu_ctx)?;
+    let mut buffer: CudaMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+
+    let mut mr = ibv_reg_mr(pd, &mut buffer, access as i32)?;
 
     let mut conn_client_info = Connection {
         addr: 0 as u64,
@@ -125,53 +122,30 @@ async fn accept(cm_id: &mut RdmaCmId, buffer: &mut CudaMemBuffer) -> Result<(Ibv
         ));
     }
 
-    Ok((mr, conn_client_info))
+    Ok((mr, buffer, conn_client_info))
 }
 
-pub async fn handle_request(
-    cm_id: &mut RdmaCmId,
-    mr: &mut IbvMr,
-    _conn: &mut Connection,
-) -> Result<()> {
+pub async fn handle_notification(cm_id: &mut RdmaCmId, mr: &mut IbvMr) -> Result<Notification> {
     let mut notification = Notification { size: 0, done: 0 };
 
-    loop {
-        rdma_post_recv(
-            cm_id,
-            None::<&mut u32>,
-            &mut notification,
-            std::mem::size_of::<Notification>(),
-            // rdma_dev.recv_mr.as_mut().unwrap(),
-            mr,
-        )?;
+    rdma_post_recv(
+        cm_id,
+        None::<&mut u32>,
+        &mut notification,
+        std::mem::size_of::<Notification>(),
+        mr,
+    )?;
 
-        let mut wc = ibv_wc::default();
-        let recv_cq = cm_id.recv_cq;
-        ibv_poll_cq(recv_cq, 1, &mut wc)?;
-        if wc.status != IBV_WC_SUCCESS {
-            return Err(TransportErrors::OpsFailed(
-                "handle_request".to_string(),
-                format!("poll_recv_comp failed with status: {:?}", wc.status),
-            ));
-        }
-        if notification.done > 0 {
-            rdma_disconnect(cm_id)?;
-            break;
-        }
+    let mut wc = ibv_wc::default();
+    let recv_cq = cm_id.recv_cq;
+    ibv_poll_cq(recv_cq, 1, &mut wc)?;
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "handle_request".to_string(),
+            format!("poll_recv_comp failed with status: {:?}", wc.status),
+        ));
     }
 
-    Ok(())
+    Ok(notification)
 }
 
-pub async fn print_msg(buffer: &CudaMemBuffer) -> Result<()> {
-
-    let mut buffer_cpu: Vec<u8> = vec![0; 100];
-
-    println!("before {:?}", &buffer_cpu);
-
-    crate::cuda::cuda_device_to_host(buffer, &mut buffer_cpu)?;
-
-    println!("after {:?}", String::from_utf8_lossy(&buffer_cpu));
-
-    Ok(())
-}

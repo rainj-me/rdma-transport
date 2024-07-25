@@ -2,7 +2,9 @@ use std::{ops::DerefMut, ptr};
 
 use cuda::{cuda_call, CuCtx};
 use cuda_sys::{
-    cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuInit, cuMemAlloc_v2, cuMemcpyDtoH_v2, cuMemcpyHtoD_v2, CU_CTX_MAP_HOST,cuMemFree_v2
+    cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuDevicePrimaryCtxRelease_v2,
+    cuDevicePrimaryCtxRetain, cuInit, cuMemAlloc_v2, cuMemFree_v2, cuMemcpyDtoH_v2,
+    cuMemcpyHtoD_v2, CU_CTX_MAP_HOST,
 };
 
 mod buffer;
@@ -23,9 +25,30 @@ pub fn cuda_init_ctx(gpu_ordinal: i32) -> Result<CuCtx> {
     Ok(CuCtx::new(cu_ctx))
 }
 
+pub fn cuda_device_primary_ctx_retain(gpu_ordinal: i32) -> Result<CuCtx> {
+    let mut cu_dev = 0;
+    let mut cu_ctx = ptr::null_mut();
+    cuda_call!(cuDeviceGet, cuDeviceGet(&mut cu_dev, gpu_ordinal))?;
+    cuda_call!(
+        cuDevicePrimaryCtxRetain,
+        cuDevicePrimaryCtxRetain(&mut cu_ctx, cu_dev)
+    )?;
+    Ok(CuCtx::new(cu_ctx))
+}
+
+pub fn cuda_device_primary_ctx_release(gpu_ordinal: i32) -> Result<()> {
+    let mut cu_dev = 0;
+    cuda_call!(cuDeviceGet, cuDeviceGet(&mut cu_dev, gpu_ordinal))?;
+    cuda_call!(
+        cuDevicePrimaryCtxRelease_v2,
+        cuDevicePrimaryCtxRelease_v2(cu_dev)
+    )?;
+    Ok(())
+}
+
 pub fn cuda_set_current_ctx(cu_ctx: &mut CuCtx) -> Result<()> {
     let cu_ctx: *mut cuda_sys::CUctx_st = cu_ctx.deref_mut();
-    cuda_call!(cuCtxSetCurrent, cuCtxSetCurrent(cu_ctx)).map_err(|e|e.into())
+    cuda_call!(cuCtxSetCurrent, cuCtxSetCurrent(cu_ctx)).map_err(|e| e.into())
 }
 
 pub fn cuda_mem_alloc(size: usize) -> Result<CudaMemBuffer> {
@@ -40,7 +63,7 @@ pub fn cuda_mem_free(buffer: &CudaMemBuffer) -> Result<()> {
         return Ok(());
     }
 
-    cuda_call!(cuMemFree_v2, cuMemFree_v2(ptr)).map_err(|e|e.into())
+    cuda_call!(cuMemFree_v2, cuMemFree_v2(ptr)).map_err(|e| e.into())
 }
 
 pub fn cuda_host_to_device(host_buffer: &[u8], device_buffer: &CudaMemBuffer) -> Result<()> {
@@ -57,7 +80,8 @@ pub fn cuda_host_to_device(host_buffer: &[u8], device_buffer: &CudaMemBuffer) ->
             host_buffer.as_ptr() as *const std::ffi::c_void,
             size,
         )
-    ).map_err(|e|e.into())
+    )
+    .map_err(|e| e.into())
 }
 
 pub fn cuda_device_to_host(device_buffer: &CudaMemBuffer, host_buffer: &mut [u8]) -> Result<()> {
@@ -74,5 +98,6 @@ pub fn cuda_device_to_host(device_buffer: &CudaMemBuffer, host_buffer: &mut [u8]
             device_buffer.get_ptr(),
             size,
         )
-    ).map_err(|e|e.into())
+    )
+    .map_err(|e| e.into())
 }
