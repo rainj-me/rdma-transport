@@ -15,3 +15,6 @@ os_socketaddr = "0"
 bytes = "1"
 thiserror = "1"
 tokio = {version = "1", features=["full"]}
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+

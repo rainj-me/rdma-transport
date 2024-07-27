@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 
 use libc::AI_PASSIVE;
 
 use rdma_core::ibverbs::{IbvMr, IbvQpInitAttr};
-use rdma_core::rdma::{RdmaAddrInfo, RdmaCmId};
+use rdma_core::rdma::{rdma_disconnect, RdmaAddrInfo, RdmaCmId};
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_query_qp, ibv_reg_mr},
     rdma::{
@@ -12,14 +13,13 @@ use rdma_core::{
     },
 };
 use rdma_core_sys::{
-    ibv_qp_attr, ibv_wc, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE,
-    IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP,
+    ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ,
+    IBV_ACCESS_REMOTE_WRITE, IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_WC_SUCCESS,
+    RDMA_PS_TCP,
 };
 
-use crate::cuda::{
-    cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx, CudaMemBuffer,
-};
-use crate::{Result, TransportErrors};
+use crate::cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx};
+use crate::{GPUMemBuffer, MemBuffer, Result, TransportErrors};
 
 use super::{Connection, Notification};
 
@@ -56,7 +56,7 @@ pub async fn accept(listen_id: &mut RdmaCmId) -> Result<RdmaCmId> {
 pub async fn handshake(
     cm_id: &mut RdmaCmId,
     gpu_ordinal: i32,
-) -> Result<(IbvMr, CudaMemBuffer, Connection)> {
+) -> Result<(Connection, (IbvMr, GPUMemBuffer), (IbvMr, MemBuffer))> {
     let qp = cm_id.qp;
     ibv_query_qp(qp, &mut ibv_qp_attr::default(), IBV_QP_CAP as i32, None)?;
 
@@ -67,23 +67,22 @@ pub async fn handshake(
     let access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
     let pd = cm_id.pd;
 
+    let mut cpu_buffer = MemBuffer::default();
+    let mut cpu_mr = ibv_reg_mr(pd, cpu_buffer.deref_mut(), access as i32)?;
+
     let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
     cuda_set_current_ctx(&mut cu_ctx)?;
-    let mut buffer: CudaMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+    let gpu_mr = ibv_reg_mr(pd, &mut gpu_buffer, access as i32)?;
 
-    let mut mr = ibv_reg_mr(pd, &mut buffer, access as i32)?;
-
-    let mut conn_client_info = Connection {
-        addr: 0 as u64,
-        rkey: 0,
-    };
+    let mut conn_client_info = Connection::default();
 
     rdma_post_recv(
         cm_id,
         None::<&mut u32>,
-        &mut conn_client_info,
+        &mut conn_client_info as *mut _ as u64,
         std::mem::size_of::<Connection>(),
-        &mut mr,
+        &mut cpu_mr,
     )?;
 
     rdma_accept(cm_id, None)?;
@@ -99,8 +98,10 @@ pub async fn handshake(
     }
 
     let mut conn_server_info = Connection {
-        addr: buffer.as_ptr() as u64,
-        rkey: mr.rkey,
+        gpu_buffer_addr: gpu_buffer.get_ptr(),
+        gpu_mr_rkey: gpu_mr.rkey,
+        cpu_buffer_addr: cpu_buffer.get_ptr(),
+        cpu_mr_rkey: cpu_mr.rkey,
     };
 
     rdma_post_send(
@@ -108,7 +109,7 @@ pub async fn handshake(
         None::<&mut u32>,
         &mut conn_server_info,
         std::mem::size_of::<Connection>(),
-        None,
+        Some(&mut cpu_mr),
         IBV_SEND_INLINE,
     )?;
 
@@ -122,18 +123,21 @@ pub async fn handshake(
         ));
     }
 
-    Ok((mr, buffer, conn_client_info))
+    Ok((conn_client_info, (gpu_mr, gpu_buffer), (cpu_mr, cpu_buffer)))
 }
 
-pub async fn handle_notification(cm_id: &mut RdmaCmId, mr: &mut IbvMr) -> Result<Notification> {
-    let mut notification = Notification { size: 0, done: 0 };
-
+pub async fn handle_notification(
+    cm_id: &mut RdmaCmId,
+    cpu_mr: &mut IbvMr,
+    cpu_buffer: &mut MemBuffer,
+) -> Result<Notification> {
+    // let mut notification = Notification::default();
     rdma_post_recv(
         cm_id,
         None::<&mut u32>,
-        &mut notification,
-        std::mem::size_of::<Notification>(),
-        mr,
+        cpu_buffer.get_ptr(),
+        cpu_buffer.get_capacity(),
+        cpu_mr,
     )?;
 
     let mut wc = ibv_wc::default();
@@ -146,6 +150,16 @@ pub async fn handle_notification(cm_id: &mut RdmaCmId, mr: &mut IbvMr) -> Result
         ));
     }
 
-    Ok(notification)
+    if wc.opcode == rdma_core_sys::IBV_WC_RECV_RDMA_WITH_IMM {
+        let size = unsafe { ntohl(wc.__bindgen_anon_1.imm_data) };
+        let data = cpu_buffer.deref().split_at(size as usize);
+        let notification = bincode::deserialize::<Notification>(data.0).unwrap();
+        return Ok(notification);
+    }
+
+    Ok(Notification::default())
 }
 
+pub fn disconnect(cm_id: &mut RdmaCmId) -> Result<()> {
+    rdma_disconnect(cm_id).map_err(|e| e.into())
+}

@@ -4,4 +4,4 @@ mod types;
 
 pub use errors::{Result, CudaErrors};
 
-pub use types::CuCtx::CuCtx;
+pub use types::{CuCtx::CuCtx, CuStream::CuStream, CuEvent::CuEvent};

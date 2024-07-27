@@ -28,9 +28,10 @@ def main():
     logging.basicConfig(stream=sys.stdout,format=FORMAT, level=logging.DEBUG)
     dt = RdmaServer(server_addr, gpu_ordinal)
     dt.listen()
-    time.sleep(120)
+    time.sleep(180)
 
     dt.shutdown()
+    time.sleep(3)
 
 if __name__ == "__main__":
     main()

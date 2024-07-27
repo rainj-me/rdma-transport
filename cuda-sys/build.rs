@@ -11,6 +11,7 @@ fn main() {
     let bindings: bindgen::Bindings = bindgen::Builder::default()
         .header(format!("{manifest_dir}/include/cuda.h"))
         .clang_arg(format!("-I{manifest_dir}/include/"))
+        .clang_arg(format!("-DCUDA_API_PER_THREAD_DEFAULT_STREAM=1"))
         .blocklist_function(".*cvt.*")
         .blocklist_function("strto.*")
         .derive_default(true)

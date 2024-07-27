@@ -39,10 +39,12 @@ def main():
     dt.fill_data(msg)
 
     for i in range(10):
-        dt.send(len(msg))
+        dt.send(0, len(msg))
         time.sleep(1)
 
+    # time.sleep(10)
     dt.shutdown()
+    time.sleep(1)
 
 
 if __name__ == "__main__":

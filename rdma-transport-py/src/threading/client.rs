@@ -1,36 +1,26 @@
 use log::{error, info};
 use pyo3::prelude::*;
-use rdma_core::ibverbs::IbvMr;
-use rdma_core::rdma::RdmaCmId;
-use rdma_transport::cuda::{cuda_host_to_device, CudaMemBuffer};
-use rdma_transport::rdma::{self, Notification};
-// use rdma_transport::{cuda, rdma};
+use rdma_transport::rdma::Notification;
+use rdma_transport::{cuda::cuda_host_to_device, rdma, GPUMemBuffer};
 use std::net::SocketAddr;
+use std::ops::DerefMut;
 use std::thread;
 use std::time::Instant;
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{channel, Sender};
+use tokio::runtime;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 #[pyclass]
-#[derive(Debug, Clone, Copy)]
 pub enum Command {
-    Send { size: usize },
+    Send { offset: u32, size: u32 },
     Complete(),
 }
 
 #[pyclass]
 pub struct RdmaClient {
-    sender: Option<Sender<Command>>,
+    sender: Option<UnboundedSender<Command>>,
     buffer: Option<(u64, usize)>,
     local_addr: SocketAddr,
     gpu_ordinal: i32,
-}
-
-pub async fn stop(cm_id: &mut RdmaCmId, mr: &mut IbvMr, buffer: &CudaMemBuffer) {
-    let mut notification = Notification { size: 0, done: 1 };
-    rdma::send(cm_id, &mut notification).await.unwrap();
-    rdma::disconnect(cm_id).unwrap();
-    rdma::deregister_mr(mr, buffer).unwrap();
 }
 
 #[pymethods]
@@ -62,32 +52,70 @@ impl RdmaClient {
             }
         };
 
-        let (tx, mut rx) = channel(1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
         self.sender = Some(tx);
         let mut cm_id = rdma::client_init(server_addr, self.local_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
-        let (mut mr, mut buffer, conn) = rdma::connect(&mut cm_id, gpu_ordinal).unwrap();
-        self.buffer = Some((buffer.get_ptr(), buffer.get_size()));
+        let (conn, (mut gpu_mr, mut gpu_buffer), (mut cpu_mr, mut cpu_buffer)) =
+            rdma::connect(&mut cm_id, gpu_ordinal).unwrap();
+        self.buffer = Some((gpu_buffer.get_ptr(), gpu_buffer.get_capacity()));
+        // csy: We can associate a cuda event to this buffer, or each buffer.
 
         let _ = thread::spawn(move || {
-            let rt = Runtime::new().unwrap();
+            let rt = runtime::Builder::new_current_thread().build().unwrap();
             rt.block_on(async {
-                while let Some(cmd) = (&mut rx).recv().await {
+                while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        Command::Send { size } => {
-                            rdma::write(&mut cm_id, &mut mr, &conn, &mut buffer, size)
-                                .await
-                                .unwrap();
+                        Command::Send { size, offset } if size > 0 => {
+                            let notification = Notification {
+                                done: 0,
+                                buffer: (&mut gpu_buffer as *mut _ as u64, offset, size),
+                                data: Vec::new(),
+                            };
+
+                            let metadata_size = bincode::serialized_size(&notification).unwrap();
+                            bincode::serialize_into(cpu_buffer.deref_mut(), &notification).unwrap();
+                            // csy: We can wait on this event here or use cuLaunchHostFunc to enqueue the write routine
+                            if let Err(e) = rdma::write(
+                                &mut cm_id,
+                                &conn,
+                                &mut gpu_mr,
+                                &mut gpu_buffer,
+                                offset as u32,
+                                size,
+                            )
+                            .await
+                            {
+                                error!("write data error {:?}", e);
+                            }
+                            if let  Err(e) = rdma::write_metadata(
+                                &mut cm_id,
+                                &conn,
+                                &mut cpu_mr,
+                                &mut cpu_buffer,
+                                metadata_size as u32,
+                            )
+                            .await{
+                                error!("write metadata error {:?}", e);
+                            }
                         }
                         Command::Complete() => {
                             info!("complete");
-                            stop(&mut cm_id, &mut mr, &mut buffer).await;
+                            rdma::client_disconnect(
+                                &mut cm_id,
+                                &conn,
+                                &mut cpu_mr,
+                                &mut cpu_buffer,
+                            )
+                            .await
+                            .unwrap();
+                            rdma::free_gpu_membuffer(&gpu_buffer).unwrap();
                             break;
                         }
+                        _ => {}
                     }
                 }
             });
-
             info!("runtime end at {:?}", Instant::now());
         });
     }
@@ -98,26 +126,24 @@ impl RdmaClient {
 
     fn fill_data(&self, data: String) {
         if let Some((ptr, size)) = self.buffer {
-            let buffer = CudaMemBuffer::new(ptr, size);
+            let buffer = GPUMemBuffer::new(ptr, size);
             cuda_host_to_device(data.as_bytes(), &buffer).unwrap();
         }
     }
 
-    fn send(&self, size: usize) {
-        if let Some(sender) = self.sender.clone() {
-            let rt = Runtime::new().unwrap();
-            rt.block_on(async move {
-                sender.send(Command::Send { size }).await.unwrap();
-            });
+    fn send(&self, offset: u32, size: u32) {
+        if let Some(sender) = self.sender.as_ref() {
+            if let Err(e) = sender.send(Command::Send { offset, size }) {
+                error!("send error {:?}", e);
+            }
         }
     }
 
-    fn shutdown(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let rt = Runtime::new().unwrap();
-            rt.block_on(async move {
-                let _ = sender.send(Command::Complete());
-            });
+    fn shutdown(&self) {
+        if let Some(sender) = self.sender.as_ref() {
+            if let Err(e) = sender.send(Command::Complete()) {
+                error!("shutdown error {:?}", e);
+            }
         }
     }
 }

@@ -1,12 +1,11 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, ops::DerefMut};
 
 use os_socketaddr::OsSocketAddr;
 
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_reg_mr, IbvMr, IbvQpInitAttr},
     rdma::{
-        rdma_connect, rdma_create_ep, rdma_getaddrinfo, rdma_post_recv, rdma_post_send,
-        RdmaAddrInfo, RdmaCmId,
+        rdma_connect, rdma_create_ep, rdma_disconnect, rdma_getaddrinfo, rdma_post_recv, rdma_post_send, RdmaAddrInfo, RdmaCmId
     },
 };
 use rdma_core_sys::{
@@ -15,11 +14,10 @@ use rdma_core_sys::{
 };
 
 use crate::{
-    cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx, CudaMemBuffer},
-    Result, TransportErrors,
+    cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx}, GPUMemBuffer, MemBuffer, Result, TransportErrors
 };
 
-use super::Connection;
+use super::{write_metadata, Connection, Notification};
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
@@ -51,7 +49,7 @@ pub fn init(server_addr: SocketAddr, local_addr: SocketAddr) -> Result<RdmaCmId>
 pub fn connect(
     cm_id: &mut RdmaCmId,
     gpu_ordinal: i32,
-) -> Result<(IbvMr, CudaMemBuffer, Connection)> {
+) -> Result<(Connection, (IbvMr, GPUMemBuffer), (IbvMr, MemBuffer))> {
     let qp = cm_id.qp;
     let pd = cm_id.pd;
 
@@ -59,26 +57,32 @@ pub fn connect(
     mod_attr.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
     ibv_modify_qp(qp, &mut mod_attr, IBV_QP_ACCESS_FLAGS as i32)?;
 
+    let mut cpu_buffer: MemBuffer = MemBuffer::default();
+    let mut cpu_mr = ibv_reg_mr(pd, cpu_buffer.deref_mut(), IBV_ACCESS_LOCAL_WRITE as i32)?;
+
     let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
     cuda_set_current_ctx(&mut cu_ctx)?;
-    let mut buffer: CudaMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
-    let mut mr = ibv_reg_mr(pd, &mut buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
+    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+    let gpu_mr = ibv_reg_mr(pd, &mut gpu_buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
 
-    let mut conn_server_info = Connection { addr: 0, rkey: 0 };
+
+    let mut conn_server_info = Connection::default();
 
     rdma_post_recv(
         cm_id,
         None::<&mut u32>,
-        &mut conn_server_info,
+        &mut conn_server_info as *mut _ as u64,
         std::mem::size_of::<Connection>(),
-        &mut mr,
+        &mut cpu_mr,
     )?;
 
     rdma_connect(cm_id, None)?;
 
     let mut conn_client_info = Connection {
-        addr: buffer.as_mut_ptr() as u64,
-        rkey: mr.rkey,
+        gpu_buffer_addr: gpu_buffer.get_ptr(),
+        gpu_mr_rkey: gpu_mr.rkey,
+        cpu_buffer_addr: cpu_buffer.get_ptr(),
+        cpu_mr_rkey: cpu_mr.rkey,
     };
 
     rdma_post_send(
@@ -112,5 +116,20 @@ pub fn connect(
         ));
     }
 
-    Ok((mr, buffer, conn_server_info))
+    Ok((conn_server_info, (gpu_mr, gpu_buffer), (cpu_mr, cpu_buffer)))
+}
+
+pub async fn disconnect(
+    cm_id: &mut RdmaCmId,
+    conn: &Connection,
+    cpu_mr: &mut IbvMr,
+    cpu_buffer: &mut MemBuffer,
+) -> Result<()> {
+    let notification = Notification::complete();
+    let size = bincode::serialized_size(&notification).unwrap();
+    bincode::serialize_into(cpu_buffer.deref_mut(), &notification)
+        .map_err(|e| TransportErrors::OpsFailed("disconnect".to_string(), e.to_string()))?;
+
+    write_metadata(cm_id, conn, cpu_mr, cpu_buffer, size as u32).await?;
+    rdma_disconnect(cm_id).map_err(|e| e.into())
 }

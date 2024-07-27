@@ -7,6 +7,6 @@ pub use cma::{
     rdma_listen,
 };
 
-pub use verbs::{rdma_post_recv, rdma_post_send, rdma_post_write};
+pub use verbs::{rdma_post_recv, rdma_post_send, rdma_post_write, rdma_post_write_with_opcode};
 
 pub use types::{RdmaAddrInfo::RdmaAddrInfo, RdmaCmId::RdmaCmId, RdmaConnParam::RdmaConnParam};

@@ -1,38 +1,40 @@
 use log::{error, info};
 use pyo3::prelude::*;
-use rdma_transport::cuda::{cuda_device_to_host, CudaMemBuffer};
-use rdma_transport::{cuda, rdma};
+use rdma_transport::cuda::cuda_device_to_host;
+use rdma_transport::rdma::Notification;
+use rdma_transport::{cuda, rdma, GPUMemBuffer};
 use std::net::SocketAddr;
 use std::thread;
 use std::time::Instant;
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot::{self, Receiver, Sender};
+use tokio::sync::oneshot::{self, Sender};
+
+#[pyclass]
+pub enum Command {
+    Complete(),
+}
+
+#[pyclass]
+pub struct Message {
+    buffer: (u32, u32),
+    req_id: String,
+    block_ids: Vec<u32>,
+}
 
 #[pyclass]
 pub struct RdmaServer {
-    sender: Option<Sender<bool>>,
+    sender: Option<Sender<Command>>,
     sock_addr: SocketAddr,
     gpu_ordinal: i32,
 }
 
-pub async fn stop(rx: &mut Receiver<bool>) -> bool {
-    match rx.await {
-        Ok(res) => {
-            info!("try to stop at {:?}", Instant::now());
-            res
-        }
-        Err(_) => true,
-    }
-}
-
-pub fn print_buffer(buffer: &CudaMemBuffer, size: usize) {
-    let mut buffer_cpu: Vec<u8> = vec![0; size];
-
-    info!("before {:?}", &buffer_cpu);
-
-    cuda_device_to_host(buffer, &mut buffer_cpu).unwrap();
-
-    info!("after {:?}", String::from_utf8_lossy(&buffer_cpu));
+pub fn print_buffer(gpu_buffer: &GPUMemBuffer, notification: &Notification) {
+    println!("notification: {:?}", notification);
+    let (_, offset, size) = notification.buffer;
+    let mut data = Box::new([0; 1024 * 1024]);
+    let device_buffer = GPUMemBuffer::new(gpu_buffer.get_ptr() + offset as u64, size as usize);
+    cuda_device_to_host(&device_buffer, data.as_mut(), Some(size as usize)).unwrap();
+    println!("data: {}", String::from_utf8_lossy(&data[..]));
 }
 
 #[pymethods]
@@ -55,7 +57,7 @@ impl RdmaServer {
     }
 
     fn listen(&mut self) {
-        let (tx, mut rx) = oneshot::channel::<bool>();
+        let (tx, mut rx) = oneshot::channel::<Command>();
         self.sender = Some(tx);
         let mut listen_id = rdma::server_init(&self.sock_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
@@ -64,7 +66,7 @@ impl RdmaServer {
             rt.block_on(async {
                 loop {
                     tokio::select! {
-                        _ = stop(&mut rx) => {
+                        Ok(Command::Complete()) = (&mut rx) => {
                             cuda::cuda_device_primary_ctx_release(gpu_ordinal).unwrap();
                             break;
                         }
@@ -72,21 +74,22 @@ impl RdmaServer {
                             info!("start qp handshake");
                             rt.spawn( async move {
                                 match rdma::handshake(&mut cm_id, gpu_ordinal).await {
-                                    Ok((mut mr, mut buffer, _conn)) =>loop {
-                                        let notification = rdma::handle_notification(&mut cm_id, &mut mr).await.unwrap();
+                                    Ok((_conn, (_gpu_mr, gpu_buffer), (mut cpu_mr, mut cpu_buffer))) =>loop {
+                                        let notification = rdma::handle_notification(&mut cm_id, &mut cpu_mr, &mut cpu_buffer).await.unwrap();
                                         if notification.done > 0 {
                                             info!("notifcation: {:?}" , notification);
-                                            rdma::deregister_mr(&mut mr, &mut buffer).unwrap();
+                                            rdma::free_gpu_membuffer(&gpu_buffer).unwrap();
                                             break;
                                         } else {
-                                            print_buffer(&buffer, notification.size);
+                                            println!("notification: {:?}", notification);
+                                            // print_buffer(&gpu_buffer, &notification);
                                         }
                                     }
                                     Err(e) => {
                                         error!("exchange qp failed: {:?}", e);
                                     }
                                 };
-                                rdma::disconnect(&mut cm_id).unwrap();
+                                rdma::server_disconnect(&mut cm_id).unwrap();
                             });
                         }
                     }
@@ -98,8 +101,8 @@ impl RdmaServer {
     }
 
     fn shutdown(&mut self) {
-        if let Some(tx) = self.sender.take() {
-            let _ = tx.send(true);
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Command::Complete());
         }
     }
 }

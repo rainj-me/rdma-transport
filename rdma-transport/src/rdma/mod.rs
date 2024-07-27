@@ -3,47 +3,83 @@ mod server;
 
 use rdma_core::{
     ibverbs::{ibv_poll_cq, IbvMr},
-    rdma::{rdma_disconnect, rdma_post_send, rdma_post_write, RdmaCmId},
+    rdma::{rdma_post_write, rdma_post_write_with_opcode, RdmaCmId},
 };
+use serde::{Deserialize, Serialize};
 
-use rdma_core_sys::{ibv_wc, IBV_SEND_INLINE, IBV_SEND_SIGNALED, IBV_WC_SUCCESS};
-pub use server::{accept, handle_notification, handshake, init as server_init};
+use rdma_core_sys::{ibv_wc, IBV_SEND_SIGNALED, IBV_WC_SUCCESS};
+pub use server::{accept, handle_notification, handshake, init as server_init, disconnect as server_disconnect};
 
-pub use client::{connect, init as client_init};
+pub use client::{connect, init as client_init, disconnect as client_disconnect};
 
-use crate::{
-    cuda::{cuda_mem_free, CudaMemBuffer},
-    Result, TransportErrors,
-};
+use crate::{cuda::cuda_mem_free, GPUMemBuffer, MemBuffer, Result, TransportErrors};
 
-pub fn deregister_mr(_mr: &mut IbvMr, buffer: &CudaMemBuffer) -> Result<()> {
+pub fn free_gpu_membuffer(buffer: &GPUMemBuffer) -> Result<()> {
     cuda_mem_free(&buffer).map_err(|e| e.into())
-}
-
-pub fn disconnect(cm_id: &mut RdmaCmId) -> Result<()> {
-    rdma_disconnect(cm_id).map_err(|e| e.into())
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Connection {
-    pub addr: u64,
-    pub rkey: u32,
+    pub gpu_buffer_addr: u64,
+    pub gpu_mr_rkey: u32,
+    pub cpu_buffer_addr: u64,
+    pub cpu_mr_rkey: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl Default for Connection {
+    fn default() -> Self {
+        Connection {
+            gpu_buffer_addr: 0,
+            gpu_mr_rkey: 0,
+            cpu_buffer_addr: 0,
+            cpu_mr_rkey: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
-    pub size: usize,
-    pub done: usize,
+    pub buffer: (u64, u32, u32),
+    pub done: u32, // 1 is done 0 is data
+    pub data: Vec<u8>,
 }
 
-pub async fn send<T>(cm_id: &mut RdmaCmId, msg: &mut T) -> Result<()> {
-    rdma_post_send(
+impl Default for Notification {
+    fn default() -> Self {
+        Notification {
+            done: 0,
+            buffer: (0, 0, 0),
+            data: Vec::new(),
+        }
+    }
+}
+
+impl Notification {
+    pub fn complete() -> Self {
+        let mut notification = Notification::default();
+        notification.done = 1;
+        notification
+    }
+}
+
+pub async fn write_metadata(
+    cm_id: &mut RdmaCmId,
+    conn: &Connection,
+    cpu_mr: &mut IbvMr,
+    cpu_buffer: &mut MemBuffer,
+    size: u32,
+) -> Result<()> {
+    rdma_post_write_with_opcode(
         cm_id,
-        None::<&mut u32>,
-        msg,
-        std::mem::size_of::<T>(),
-        None,
-        IBV_SEND_INLINE,
+        Some(&mut 1),
+        cpu_buffer.get_ptr(),
+        cpu_buffer.get_capacity() - 16,
+        Some(cpu_mr),
+        IBV_SEND_SIGNALED,
+        conn.cpu_buffer_addr,
+        conn.cpu_mr_rkey,
+        rdma_core_sys::IBV_WR_RDMA_WRITE_WITH_IMM,
+        size as u32,
     )?;
 
     let mut wc = ibv_wc::default();
@@ -52,29 +88,31 @@ pub async fn send<T>(cm_id: &mut RdmaCmId, msg: &mut T) -> Result<()> {
 
     if wc.status != IBV_WC_SUCCESS {
         return Err(TransportErrors::OpsFailed(
-            "send".to_string(),
-            format!("poll_send_comp failed with status: {:?}", wc.status),
+            "write_metadata".to_string(),
+            format!("poll_write_comp failed with status: {:?}", wc.status),
         ));
     }
+
     Ok(())
 }
 
 pub async fn write(
     cm_id: &mut RdmaCmId,
-    mr: &mut IbvMr,
     conn: &Connection,
-    buffer: &mut CudaMemBuffer,
-    size: usize,
+    mr: &mut IbvMr,
+    buffer: &mut GPUMemBuffer,
+    offset: u32,
+    size: u32,
 ) -> Result<()> {
     rdma_post_write(
         cm_id,
         Some(&mut 1),
-        buffer.as_mut_ptr() as *mut std::ffi::c_void,
-        size,
+        buffer.get_ptr() + offset as u64,
+        size as usize,
         Some(mr),
         IBV_SEND_SIGNALED,
-        conn.addr,
-        conn.rkey,
+        conn.gpu_buffer_addr + offset as u64,
+        conn.gpu_mr_rkey,
     )?;
 
     let mut wc = ibv_wc::default();
@@ -88,30 +126,6 @@ pub async fn write(
         ));
     }
 
-    let mut notification = Notification {
-        size: size,
-        done: 0,
-    };
-
-    rdma_post_send(
-        cm_id,
-        None::<&mut u32>,
-        &mut notification,
-        std::mem::size_of::<Notification>(),
-        None,
-        IBV_SEND_INLINE,
-    )?;
-
-    let mut wc = ibv_wc::default();
-    let send_cq = cm_id.send_cq;
-    ibv_poll_cq(send_cq, 1, &mut wc)?;
-
-    if wc.status != IBV_WC_SUCCESS {
-        return Err(TransportErrors::OpsFailed(
-            "write".to_string(),
-            format!("poll_send_comp failed with status: {:?}", wc.status),
-        ));
-    }
-
     Ok(())
 }
+
