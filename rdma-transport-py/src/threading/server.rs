@@ -7,7 +7,12 @@ use std::net::SocketAddr;
 use std::thread;
 use std::time::Instant;
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot::{self, Sender};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver},
+    oneshot::{self, Sender},
+};
+
+use super::Message;
 
 #[pyclass]
 pub enum Command {
@@ -15,15 +20,9 @@ pub enum Command {
 }
 
 #[pyclass]
-pub struct Message {
-    buffer: (u32, u32),
-    req_id: String,
-    block_ids: Vec<u32>,
-}
-
-#[pyclass]
 pub struct RdmaServer {
-    sender: Option<Sender<Command>>,
+    cmd_sender: Option<Sender<Command>>,
+    data_reciever: Option<UnboundedReceiver<Message>>,
     sock_addr: SocketAddr,
     gpu_ordinal: i32,
 }
@@ -50,23 +49,27 @@ impl RdmaServer {
         };
 
         RdmaServer {
-            sender: None,
+            cmd_sender: None,
+            data_reciever: None,
             sock_addr,
             gpu_ordinal,
         }
     }
 
     fn listen(&mut self) {
-        let (tx, mut rx) = oneshot::channel::<Command>();
-        self.sender = Some(tx);
+        let (cmd_tx, mut cmd_rx) = oneshot::channel::<Command>();
+        let (data_tx, data_rx) = mpsc::unbounded_channel::<Message>();
+        self.cmd_sender = Some(cmd_tx);
+        self.data_reciever = Some(data_rx);
         let mut listen_id = rdma::server_init(&self.sock_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
         let _ = thread::spawn(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
                 loop {
+                    let data_tx = data_tx.clone();
                     tokio::select! {
-                        Ok(Command::Complete()) = (&mut rx) => {
+                        Ok(Command::Complete()) = (&mut cmd_rx) => {
                             cuda::cuda_device_primary_ctx_release(gpu_ordinal).unwrap();
                             break;
                         }
@@ -81,8 +84,8 @@ impl RdmaServer {
                                             rdma::free_gpu_membuffer(&gpu_buffer).unwrap();
                                             break;
                                         } else {
-                                            println!("notification: {:?}", notification);
-                                            // print_buffer(&gpu_buffer, &notification);
+                                            // info!("notification: {:?}", notification);
+                                            data_tx.send(notification.into()).unwrap();
                                         }
                                     }
                                     Err(e) => {
@@ -100,8 +103,16 @@ impl RdmaServer {
         });
     }
 
+    async fn recv_message(&mut self) -> Option<Message> {
+        if let Some(rx) = &mut self.data_reciever {
+            rx.recv().await
+        } else {
+            None
+        }
+    }
+
     fn shutdown(&mut self) {
-        if let Some(sender) = self.sender.take() {
+        if let Some(sender) = self.cmd_sender.take() {
             let _ = sender.send(Command::Complete());
         }
     }

@@ -39,7 +39,7 @@ def main():
     dt.fill_data(msg)
 
     for i in range(10):
-        dt.send(0, len(msg))
+        dt.send(0, len(msg), b"abcdefg")
         time.sleep(1)
 
     # time.sleep(10)

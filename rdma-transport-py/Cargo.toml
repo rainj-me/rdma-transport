@@ -9,7 +9,7 @@ name = "rdma_transport"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.22.0"
+pyo3 = {version = "0.22.0", features= ["experimental-async"]}
 pyo3-log = "0"
 log = "0"
 tokio = { version = "1", features = ["full"] }

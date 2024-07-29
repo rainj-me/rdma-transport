@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use threading::{RdmaClient, RdmaServer};
+use threading::{Message, RdmaClient, RdmaServer};
 
 mod threading;
 
@@ -18,5 +18,6 @@ fn rdma_transport_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_class::<RdmaServer>()?;
     m.add_class::<RdmaClient>()?;
+    m.add_class::<Message>()?;
     Ok(())
 }

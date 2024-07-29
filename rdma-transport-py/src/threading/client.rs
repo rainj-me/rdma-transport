@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 #[pyclass]
 pub enum Command {
-    Send { offset: u32, size: u32 },
+    Send { offset: u32, size: u32, data: Vec<u8> },
     Complete(),
 }
 
@@ -66,11 +66,11 @@ impl RdmaClient {
             rt.block_on(async {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        Command::Send { size, offset } if size > 0 => {
+                        Command::Send { size, offset , data } if size > 0 => {
                             let notification = Notification {
                                 done: 0,
                                 buffer: (&mut gpu_buffer as *mut _ as u64, offset, size),
-                                data: Vec::new(),
+                                data,
                             };
 
                             let metadata_size = bincode::serialized_size(&notification).unwrap();
@@ -131,9 +131,9 @@ impl RdmaClient {
         }
     }
 
-    fn send(&self, offset: u32, size: u32) {
+    fn send(&self, offset: u32, size: u32, data: Vec<u8>) {
         if let Some(sender) = self.sender.as_ref() {
-            if let Err(e) = sender.send(Command::Send { offset, size }) {
+            if let Err(e) = sender.send(Command::Send { offset, size, data }) {
                 error!("send error {:?}", e);
             }
         }
