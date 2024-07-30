@@ -3,7 +3,7 @@ use std::{
     slice,
 };
 
-pub const OFFSET_SLOTS: usize = 16;
+pub const OFFSET_SLOTS: usize = 64;
 pub const CPU_BUFFER_BASE_SIZE: usize = 4096; // 4KB
 pub const CPU_BUFFER_SIZE: usize = CPU_BUFFER_BASE_SIZE * OFFSET_SLOTS;
 pub const GPU_BUFFER_BASE_SIZE: usize = 1024 * 1024; // 1MB

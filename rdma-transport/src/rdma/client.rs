@@ -17,9 +17,7 @@ use crate::{
     buffer::GPU_BUFFER_SIZE, cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx}, GPUMemBuffer, MemBuffer, Result, TransportErrors
 };
 
-use super::{write_metadata, Connection, Notification};
-
-// const BUFFER_SIZE: usize = 16 * 1024 * 1024;
+use super::{recv_ack, write_metadata, Connection, Notification};
 
 pub fn init(server_addr: SocketAddr, local_addr: SocketAddr) -> Result<RdmaCmId> {
     let mut src_addr: OsSocketAddr = local_addr.into();
@@ -130,5 +128,6 @@ pub async fn disconnect(
         .map_err(|e| TransportErrors::OpsFailed("disconnect".to_string(), e.to_string()))?;
 
     write_metadata(cm_id, conn, cpu_mr, cpu_buffer, 0, size as u16).await?;
+    let _ = recv_ack(cm_id, cpu_mr).await?;
     rdma_disconnect(cm_id).map_err(|e| e.into())
 }

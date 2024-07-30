@@ -24,8 +24,6 @@ use crate::{GPUMemBuffer, MemBuffer, Result, TransportErrors, GPU_BUFFER_SIZE};
 
 use super::{Connection, Notification};
 
-// const BUFFER_SIZE: usize = 16 * 1024 * 1024;
-
 pub fn init(bind_addr: &SocketAddr) -> Result<RdmaCmId> {
     let mut hints = RdmaAddrInfo::default();
     hints.ai_flags = AI_PASSIVE;
@@ -156,8 +154,8 @@ pub async fn handle_notification(
         let offset = (imm_data & 0xFFFF0000) >> 16;
         let size = (imm_data & 0x0000FFFF) as usize;
         let start = (offset as usize) * CPU_BUFFER_BASE_SIZE;
-        // println!("offset: {}, size: {}", offset, size);
         let data = &cpu_buffer[start .. (start + size)];
+        // println!("offset: {}, size: {}, start:{}, end: {}, data: {:?}", offset, size, start, start + size, &data[0..10] );
         let notification = bincode::deserialize::<Notification>(data).unwrap();
         return Ok(notification);
     }

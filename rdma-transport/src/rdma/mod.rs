@@ -3,7 +3,7 @@ mod server;
 
 use rdma_core::{
     ibverbs::{ibv_poll_cq, IbvMr},
-    rdma::{rdma_post_write, rdma_post_write_with_opcode, RdmaCmId},
+    rdma::{rdma_post_recv, rdma_post_send, rdma_post_write, rdma_post_write_with_opcode, RdmaCmId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +46,7 @@ impl Default for Connection {
 pub struct Notification {
     pub buffer: (u64, u32, u32),
     pub done: u32, // 1 is done 0 is data
-    pub data: Vec<u8>,
+    pub data: Option<Vec<u8>>,
 }
 
 impl Default for Notification {
@@ -54,7 +54,7 @@ impl Default for Notification {
         Notification {
             done: 0,
             buffer: (0, 0, 0),
-            data: Vec::new(),
+            data: None,
         }
     }
 }
@@ -65,6 +65,86 @@ impl Notification {
         notification.done = 1;
         notification
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Ack {
+    pub done: u32,
+    pub buffer: (u64, u32, u32),
+}
+
+impl From<&Notification> for Ack {
+    fn from(value: &Notification) -> Self {
+        Self{
+            buffer: value.buffer,
+            done: value.done,
+        }
+    }
+}
+
+impl Default for Ack {
+    fn default() -> Self {
+        Ack {
+            buffer: (0, 0, 0),
+            done: 0,
+        }
+    }
+}
+
+
+pub async fn send_ack(
+    cm_id: &mut RdmaCmId,
+    cpu_mr: &mut IbvMr,
+    notification: &Notification,
+)  -> Result<()> {
+    let mut ack : Ack = notification.into();
+    rdma_post_send(
+        cm_id,
+        None::<&mut u32>,
+        &mut ack,
+        std::mem::size_of::<Ack>(),
+        Some(cpu_mr),
+        rdma_core_sys::IBV_SEND_INLINE,
+    )?;
+
+    let mut wc = ibv_wc::default();
+    let send_cq = cm_id.send_cq;
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "send_ack".to_string(),
+            format!("poll_send_comp failed with status: {:?}", wc.status),
+        ));
+    }
+
+    Ok(())
+}
+
+
+pub async fn recv_ack(
+    cm_id: &mut RdmaCmId,
+    cpu_mr: &mut IbvMr
+)  -> Result<Ack> {
+    let mut ack = Ack::default();
+    rdma_post_recv(
+        cm_id,
+        None::<&mut u32>,
+        &mut ack as *mut _ as u64,
+        std::mem::size_of::<Ack>(),
+        cpu_mr,
+    )?;
+
+    let mut wc = ibv_wc::default();
+    let recv_cq = cm_id.recv_cq;
+    ibv_poll_cq(recv_cq, 1, &mut wc)?;
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "recv_ack".to_string(),
+            format!("poll_recv_comp failed with status: {:?}", wc.status),
+        ));
+    }
+
+    Ok(ack)
 }
 
 pub async fn write_metadata(
