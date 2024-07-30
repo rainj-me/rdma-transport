@@ -3,6 +3,12 @@ use std::{
     slice,
 };
 
+pub const OFFSET_SLOTS: usize = 16;
+pub const CPU_BUFFER_BASE_SIZE: usize = 4096; // 4KB
+pub const CPU_BUFFER_SIZE: usize = CPU_BUFFER_BASE_SIZE * OFFSET_SLOTS;
+pub const GPU_BUFFER_BASE_SIZE: usize = 1024 * 1024; // 1MB
+pub const GPU_BUFFER_SIZE: usize = GPU_BUFFER_BASE_SIZE * OFFSET_SLOTS;
+
 #[derive(Debug, Clone, Copy)]
 pub struct GPUMemBuffer {
     ptr: u64,
@@ -41,13 +47,13 @@ impl DerefMut for GPUMemBuffer {
 
 #[derive(Debug, Clone)]
 pub struct MemBuffer {
-    buffer: Box<[u8; 4096]>,
+    buffer: Box<[u8; CPU_BUFFER_SIZE]>,
 }
 
 impl MemBuffer {
     pub fn new() -> MemBuffer {
         MemBuffer {
-            buffer: Box::new([0; 4096]),
+            buffer: Box::new([0; CPU_BUFFER_SIZE]),
         }
     }
 
@@ -57,6 +63,10 @@ impl MemBuffer {
 
     pub fn get_capacity(&self) -> usize {
         self.buffer.len()
+    }
+
+    pub fn range(&self, start: usize, end: usize) -> Vec<u8> {
+        self.buffer[start .. end].to_vec()
     }
 }
 

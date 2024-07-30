@@ -14,12 +14,12 @@ use rdma_core_sys::{
 };
 
 use crate::{
-    cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx}, GPUMemBuffer, MemBuffer, Result, TransportErrors
+    buffer::GPU_BUFFER_SIZE, cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx}, GPUMemBuffer, MemBuffer, Result, TransportErrors
 };
 
 use super::{write_metadata, Connection, Notification};
 
-const BUFFER_SIZE: usize = 16 * 1024 * 1024;
+// const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn init(server_addr: SocketAddr, local_addr: SocketAddr) -> Result<RdmaCmId> {
     let mut src_addr: OsSocketAddr = local_addr.into();
@@ -62,9 +62,8 @@ pub fn connect(
 
     let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
     cuda_set_current_ctx(&mut cu_ctx)?;
-    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(GPU_BUFFER_SIZE)?;
     let gpu_mr = ibv_reg_mr(pd, &mut gpu_buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
-
 
     let mut conn_server_info = Connection::default();
 
@@ -130,6 +129,6 @@ pub async fn disconnect(
     bincode::serialize_into(cpu_buffer.deref_mut(), &notification)
         .map_err(|e| TransportErrors::OpsFailed("disconnect".to_string(), e.to_string()))?;
 
-    write_metadata(cm_id, conn, cpu_mr, cpu_buffer, size as u32).await?;
+    write_metadata(cm_id, conn, cpu_mr, cpu_buffer, 0, size as u16).await?;
     rdma_disconnect(cm_id).map_err(|e| e.into())
 }

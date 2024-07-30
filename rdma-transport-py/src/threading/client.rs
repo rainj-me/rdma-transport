@@ -1,13 +1,13 @@
 use log::{error, info};
 use pyo3::prelude::*;
-use rdma_transport::rdma::Notification;
+use rdma_transport::{rdma::Notification, CPU_BUFFER_BASE_SIZE};
 use rdma_transport::{cuda::cuda_host_to_device, rdma, GPUMemBuffer};
 use std::net::SocketAddr;
-use std::ops::DerefMut;
 use std::thread;
 use std::time::Instant;
 use tokio::runtime;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender};
+
 
 #[pyclass]
 pub enum Command {
@@ -17,7 +17,7 @@ pub enum Command {
 
 #[pyclass]
 pub struct RdmaClient {
-    sender: Option<UnboundedSender<Command>>,
+    sender: Option<Sender<Command>>,
     buffer: Option<(u64, usize)>,
     local_addr: SocketAddr,
     gpu_ordinal: i32,
@@ -52,7 +52,7 @@ impl RdmaClient {
             }
         };
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(1024);
         self.sender = Some(tx);
         let mut cm_id = rdma::client_init(server_addr, self.local_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
@@ -60,6 +60,7 @@ impl RdmaClient {
             rdma::connect(&mut cm_id, gpu_ordinal).unwrap();
         self.buffer = Some((gpu_buffer.get_ptr(), gpu_buffer.get_capacity()));
         // csy: We can associate a cuda event to this buffer, or each buffer.
+        info!("client gpu_buffer: {:?}", gpu_buffer);
 
         let _ = thread::spawn(move || {
             let rt = runtime::Builder::new_current_thread().build().unwrap();
@@ -74,7 +75,10 @@ impl RdmaClient {
                             };
 
                             let metadata_size = bincode::serialized_size(&notification).unwrap();
-                            bincode::serialize_into(cpu_buffer.deref_mut(), &notification).unwrap();
+                            let start = offset as usize * CPU_BUFFER_BASE_SIZE;
+                            let end = start + CPU_BUFFER_BASE_SIZE;
+                            let buffer = &mut cpu_buffer[start..end];
+                            bincode::serialize_into(buffer, &notification).unwrap();
                             // csy: We can wait on this event here or use cuLaunchHostFunc to enqueue the write routine
                             if let Err(e) = rdma::write(
                                 &mut cm_id,
@@ -93,7 +97,8 @@ impl RdmaClient {
                                 &conn,
                                 &mut cpu_mr,
                                 &mut cpu_buffer,
-                                metadata_size as u32,
+                                offset as u16,
+                                metadata_size as u16,
                             )
                             .await{
                                 error!("write metadata error {:?}", e);
@@ -131,17 +136,17 @@ impl RdmaClient {
         }
     }
 
-    fn send(&self, offset: u32, size: u32, data: Vec<u8>) {
-        if let Some(sender) = self.sender.as_ref() {
-            if let Err(e) = sender.send(Command::Send { offset, size, data }) {
+    async fn send(&self, offset: u32, size: u32, data: Vec<u8>) {
+        if let Some(sender) = &self.sender {
+            if let Err(e) = sender.send(Command::Send { offset, size, data }).await {
                 error!("send error {:?}", e);
             }
         }
     }
 
-    fn shutdown(&self) {
+    async fn shutdown(&self) {
         if let Some(sender) = self.sender.as_ref() {
-            if let Err(e) = sender.send(Command::Complete()) {
+            if let Err(e) = sender.send(Command::Complete()).await {
                 error!("shutdown error {:?}", e);
             }
         }

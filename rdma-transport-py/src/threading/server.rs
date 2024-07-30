@@ -2,7 +2,7 @@ use log::{error, info};
 use pyo3::prelude::*;
 use rdma_transport::cuda::cuda_device_to_host;
 use rdma_transport::rdma::Notification;
-use rdma_transport::{cuda, rdma, GPUMemBuffer};
+use rdma_transport::{cuda, rdma, GPUMemBuffer, GPU_BUFFER_BASE_SIZE};
 use std::net::SocketAddr;
 use std::thread;
 use std::time::Instant;
@@ -30,7 +30,7 @@ pub struct RdmaServer {
 pub fn print_buffer(gpu_buffer: &GPUMemBuffer, notification: &Notification) {
     println!("notification: {:?}", notification);
     let (_, offset, size) = notification.buffer;
-    let mut data = Box::new([0; 1024 * 1024]);
+    let mut data = Box::new([0; GPU_BUFFER_BASE_SIZE]);
     let device_buffer = GPUMemBuffer::new(gpu_buffer.get_ptr() + offset as u64, size as usize);
     cuda_device_to_host(&device_buffer, data.as_mut(), Some(size as usize)).unwrap();
     println!("data: {}", String::from_utf8_lossy(&data[..]));
@@ -79,6 +79,7 @@ impl RdmaServer {
                                 match rdma::handshake(&mut cm_id, gpu_ordinal).await {
                                     Ok((_conn, (_gpu_mr, gpu_buffer), (mut cpu_mr, mut cpu_buffer))) =>loop {
                                         let notification = rdma::handle_notification(&mut cm_id, &mut cpu_mr, &mut cpu_buffer).await.unwrap();
+                                        info!("before clone: {}, after clone{}", cpu_buffer.get_ptr(), notification.data.as_ptr() as u64);
                                         if notification.done > 0 {
                                             info!("notifcation: {:?}" , notification);
                                             rdma::free_gpu_membuffer(&gpu_buffer).unwrap();

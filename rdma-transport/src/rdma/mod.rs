@@ -8,11 +8,16 @@ use rdma_core::{
 use serde::{Deserialize, Serialize};
 
 use rdma_core_sys::{ibv_wc, IBV_SEND_SIGNALED, IBV_WC_SUCCESS};
-pub use server::{accept, handle_notification, handshake, init as server_init, disconnect as server_disconnect};
+pub use server::{
+    accept, disconnect as server_disconnect, handle_notification, handshake, init as server_init,
+};
 
-pub use client::{connect, init as client_init, disconnect as client_disconnect};
+pub use client::{connect, disconnect as client_disconnect, init as client_init};
 
-use crate::{cuda::cuda_mem_free, GPUMemBuffer, MemBuffer, Result, TransportErrors};
+use crate::{
+    buffer::CPU_BUFFER_BASE_SIZE, cuda::cuda_mem_free, GPUMemBuffer, MemBuffer, Result,
+    TransportErrors, GPU_BUFFER_BASE_SIZE,
+};
 
 pub fn free_gpu_membuffer(buffer: &GPUMemBuffer) -> Result<()> {
     cuda_mem_free(&buffer).map_err(|e| e.into())
@@ -67,19 +72,21 @@ pub async fn write_metadata(
     conn: &Connection,
     cpu_mr: &mut IbvMr,
     cpu_buffer: &mut MemBuffer,
-    size: u32,
+    offset: u16,
+    size: u16,
 ) -> Result<()> {
+    let imm_data = ((offset as u32) << 16) + size as u32;
     rdma_post_write_with_opcode(
         cm_id,
         Some(&mut 1),
-        cpu_buffer.get_ptr(),
-        cpu_buffer.get_capacity() - 16,
+        cpu_buffer.get_ptr() + (offset as u64 * CPU_BUFFER_BASE_SIZE as u64),
+        CPU_BUFFER_BASE_SIZE,
         Some(cpu_mr),
         IBV_SEND_SIGNALED,
-        conn.cpu_buffer_addr,
+        conn.cpu_buffer_addr + (offset as u64 * CPU_BUFFER_BASE_SIZE as u64),
         conn.cpu_mr_rkey,
         rdma_core_sys::IBV_WR_RDMA_WRITE_WITH_IMM,
-        size as u32,
+        imm_data,
     )?;
 
     let mut wc = ibv_wc::default();
@@ -107,11 +114,11 @@ pub async fn write(
     rdma_post_write(
         cm_id,
         Some(&mut 1),
-        buffer.get_ptr() + offset as u64,
+        buffer.get_ptr() + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
         size as usize,
         Some(mr),
         IBV_SEND_SIGNALED,
-        conn.gpu_buffer_addr + offset as u64,
+        conn.gpu_buffer_addr + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
         conn.gpu_mr_rkey,
     )?;
 
@@ -128,4 +135,3 @@ pub async fn write(
 
     Ok(())
 }
-

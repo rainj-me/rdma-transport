@@ -1,6 +1,6 @@
 use std::{ops::DerefMut, ptr};
 
-use cuda::{cuda_call, CuCtx, CuEvent, CuStream, CudaErrors};
+use cuda::{cuda_call, CuCtx, CuEvent, CuStream};
 use cuda_sys::{
     cuCtxCreate_v2, cuCtxSetCurrent, cuDeviceGet, cuDevicePrimaryCtxRelease_v2, cuDevicePrimaryCtxRetain, cuEventCreate, cuEventQuery, cuInit, cuMemAlloc_v2, cuMemFree_v2, cuMemcpyDtoH_v2_ptds as cuMemcpyDtoH_v2, cuMemcpyHtoD_v2_ptds as cuMemcpyHtoD_v2, cuStreamCreate, cuStreamWaitEvent_ptsz, CU_CTX_MAP_HOST, CU_EVENT_DISABLE_TIMING, CU_EVENT_WAIT_DEFAULT, CU_STREAM_NON_BLOCKING
 };

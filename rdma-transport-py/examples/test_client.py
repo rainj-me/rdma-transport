@@ -4,11 +4,12 @@ import sys
 import time
 import torch
 import argparse
+import asyncio
 
 FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
 logging.basicConfig(stream=sys.stdout,format=FORMAT, level=logging.DEBUG)
 
-def main():
+async def main():
     # Create the parser
     parser = argparse.ArgumentParser(description="A simple script to greet the user.")
     
@@ -39,7 +40,7 @@ def main():
     dt.fill_data(msg)
 
     for i in range(10):
-        dt.send(0, len(msg), b"abcdefg")
+        await dt.send(i, len(msg), b"abcdefg")
         time.sleep(1)
 
     # time.sleep(10)
@@ -48,5 +49,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
 

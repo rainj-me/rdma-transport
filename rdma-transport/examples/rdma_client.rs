@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use rdma_transport::cuda::{cuda_host_to_device, cuda_init_ctx};
 use rdma_transport::rdma::{self, Notification};
+use rdma_transport::GPU_BUFFER_BASE_SIZE;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
@@ -13,7 +14,7 @@ pub async fn main() -> Result<()> {
     let local_addr = "192.168.14.224:23461".parse::<SocketAddr>()?;
     let gpu_ordinal = 4;
 
-    let msg_size = 1024 * 1024;
+    let msg_size = GPU_BUFFER_BASE_SIZE as u32;
     let loops = 100;
 
     let _ = cuda_init_ctx(gpu_ordinal)?;
@@ -35,7 +36,7 @@ pub async fn main() -> Result<()> {
     let start = Instant::now();
     for i in 0..loops {
         let total_offsets = gpu_buffer.get_capacity() as u32 / msg_size;
-        let offset = (i % total_offsets) * msg_size;
+        let offset = i % total_offsets;
 
         let notification = Notification {
             done: 0,
@@ -58,7 +59,7 @@ pub async fn main() -> Result<()> {
             msg_size,
         )
         .await?;
-        rdma::write_metadata(&mut cm_id, &conn, &mut cpu_mr, &mut cpu_buffer, size as u32).await?;
+        rdma::write_metadata(&mut cm_id, &conn, &mut cpu_mr, &mut cpu_buffer, offset as u16, size as u16).await?;
     }
 
     let elapse = start.elapsed().as_millis();

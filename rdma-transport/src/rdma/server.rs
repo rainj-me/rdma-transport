@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 
 use libc::AI_PASSIVE;
 
@@ -18,12 +18,13 @@ use rdma_core_sys::{
     RDMA_PS_TCP,
 };
 
+use crate::buffer::CPU_BUFFER_BASE_SIZE;
 use crate::cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx};
-use crate::{GPUMemBuffer, MemBuffer, Result, TransportErrors};
+use crate::{GPUMemBuffer, MemBuffer, Result, TransportErrors, GPU_BUFFER_SIZE};
 
 use super::{Connection, Notification};
 
-const BUFFER_SIZE: usize = 16 * 1024 * 1024;
+// const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn init(bind_addr: &SocketAddr) -> Result<RdmaCmId> {
     let mut hints = RdmaAddrInfo::default();
@@ -72,7 +73,7 @@ pub async fn handshake(
 
     let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
     cuda_set_current_ctx(&mut cu_ctx)?;
-    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(BUFFER_SIZE)?;
+    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(GPU_BUFFER_SIZE)?;
     let gpu_mr = ibv_reg_mr(pd, &mut gpu_buffer, access as i32)?;
 
     let mut conn_client_info = Connection::default();
@@ -151,9 +152,13 @@ pub async fn handle_notification(
     }
 
     if wc.opcode == rdma_core_sys::IBV_WC_RECV_RDMA_WITH_IMM {
-        let size = unsafe { ntohl(wc.__bindgen_anon_1.imm_data) };
-        let data = cpu_buffer.deref().split_at(size as usize);
-        let notification = bincode::deserialize::<Notification>(data.0).unwrap();
+        let imm_data = unsafe { ntohl(wc.__bindgen_anon_1.imm_data) };
+        let offset = (imm_data & 0xFFFF0000) >> 16;
+        let size = (imm_data & 0x0000FFFF) as usize;
+        let start = (offset as usize) * CPU_BUFFER_BASE_SIZE;
+        // println!("offset: {}, size: {}", offset, size);
+        let data = &cpu_buffer[start .. (start + size)];
+        let notification = bincode::deserialize::<Notification>(data).unwrap();
         return Ok(notification);
     }
 
