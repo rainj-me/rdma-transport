@@ -79,15 +79,13 @@ impl RdmaServer {
                                 match rdma::handshake(&mut cm_id, gpu_ordinal).await {
                                     Ok((_conn, (_gpu_mr, gpu_buffer), (mut cpu_mr, mut cpu_buffer))) =>loop {
                                         let notification = rdma::handle_notification(&mut cm_id, &mut cpu_mr, &mut cpu_buffer).await.unwrap();
-                                        // info!("before clone: {}, after clone{}", cpu_buffer.get_ptr(), notification.data.as_ptr() as u64);
+                                        info!("before clone: {}, after clone{}", cpu_buffer.get_ptr(), notification.data.as_ptr() as u64);
                                         if notification.done > 0 {
                                             info!("notifcation: {:?}" , notification);
-                                            rdma::send_ack(&mut cm_id, &mut cpu_mr, &notification).await.unwrap();
                                             rdma::free_gpu_membuffer(&gpu_buffer).unwrap();
                                             break;
                                         } else {
                                             // info!("notification: {:?}", notification);
-                                            rdma::send_ack(&mut cm_id, &mut cpu_mr, &notification).await.unwrap();
                                             data_tx.send(notification.into()).unwrap();
                                         }
                                     }

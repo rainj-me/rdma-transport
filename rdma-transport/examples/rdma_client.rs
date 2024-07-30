@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
+use std::ops::DerefMut;
 use std::time::Instant;
 
 use anyhow::Result;
 
 use rdma_transport::cuda::{cuda_host_to_device, cuda_init_ctx};
 use rdma_transport::rdma::{self, Notification};
-use rdma_transport::{CPU_BUFFER_BASE_SIZE, GPU_BUFFER_BASE_SIZE};
+use rdma_transport::GPU_BUFFER_BASE_SIZE;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
@@ -40,16 +41,14 @@ pub async fn main() -> Result<()> {
         let notification = Notification {
             done: 0,
             buffer: (&mut gpu_buffer as *mut _ as u64, offset, msg_size),
-            data: Some(Default::default()),
+            data: Vec::new(),
         };
 
         let (start, end) = (offset as usize, offset as usize + 32);
         println!("data: {}", String::from_utf8_lossy(&msg[start..end]));
 
-        let size = bincode::serialized_size(&notification).unwrap() as usize;
-        let (start, end) = (offset as usize * CPU_BUFFER_BASE_SIZE, offset as usize * CPU_BUFFER_BASE_SIZE + size);
-        let data = &mut cpu_buffer[start..end];
-        bincode::serialize_into(data, &notification)?;
+        let size = bincode::serialized_size(&notification).unwrap();
+        bincode::serialize_into(cpu_buffer.deref_mut(), &notification)?;
         
         rdma::write(
             &mut cm_id,
@@ -61,8 +60,6 @@ pub async fn main() -> Result<()> {
         )
         .await?;
         rdma::write_metadata(&mut cm_id, &conn, &mut cpu_mr, &mut cpu_buffer, offset as u16, size as u16).await?;
-        let ack = rdma::recv_ack(&mut cm_id, &mut cpu_mr).await?;
-        println!("ack notification: {:?}", ack);
     }
 
     let elapse = start.elapsed().as_millis();

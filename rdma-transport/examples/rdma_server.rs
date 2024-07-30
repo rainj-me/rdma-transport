@@ -22,7 +22,6 @@ pub async fn main() -> Result<()> {
                             .unwrap();
                     if notification.done == 1 {
                         println!("notifcation: {:?}", notification);
-                        rdma::send_ack(&mut cm_id, &mut cpu_mr, &notification).await.unwrap();
                         rdma::server_disconnect(&mut cm_id).unwrap();
                         rdma::free_gpu_membuffer(&mut gpu_buffer).unwrap();
                         break;
@@ -33,7 +32,6 @@ pub async fn main() -> Result<()> {
                         let device_buffer =
                             GPUMemBuffer::new(gpu_buffer.get_ptr() + offset as u64, size as usize);
                         cuda_device_to_host(&device_buffer, data.as_mut(), Some(32)).unwrap();
-                        rdma::send_ack(&mut cm_id, &mut cpu_mr, &notification).await.unwrap();
                         println!("data: {}", String::from_utf8_lossy(&data[0..32]));
                     }
                 },

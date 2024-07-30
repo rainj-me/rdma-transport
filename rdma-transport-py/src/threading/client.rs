@@ -52,7 +52,7 @@ impl RdmaClient {
             }
         };
 
-        let (tx, mut rx) = mpsc::channel(8);
+        let (tx, mut rx) = mpsc::channel(1024);
         self.sender = Some(tx);
         let mut cm_id = rdma::client_init(server_addr, self.local_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
@@ -71,7 +71,7 @@ impl RdmaClient {
                             let notification = Notification {
                                 done: 0,
                                 buffer: (&mut gpu_buffer as *mut _ as u64, offset, size),
-                                data: Some(data),
+                                data,
                             };
 
                             let metadata_size = bincode::serialized_size(&notification).unwrap();
@@ -102,10 +102,6 @@ impl RdmaClient {
                             )
                             .await{
                                 error!("write metadata error {:?}", e);
-                            }
-
-                            if let Err(e) = rdma::recv_ack(&mut cm_id, &mut cpu_mr).await {
-                                error!("recv ack error {:?}", e);
                             }
                         }
                         Command::Complete() => {

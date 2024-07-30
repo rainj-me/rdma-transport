@@ -28,7 +28,7 @@ impl From<Notification> for Message {
     fn from(value: Notification) -> Self {
         Message {
             buffer: value.buffer,
-            data: value.data.unwrap_or_default()
+            data: value.data
         }
     }
 }
