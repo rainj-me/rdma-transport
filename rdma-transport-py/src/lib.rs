@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 // use general::{Message, RdmaClient, RdmaServer};
-use vllm::{TensorBlock, VllmRdmaClient, VllmRdmaServer};
+use vllm::{TensorBlock, TensorBlocks, VllmRdmaClient, VllmRdmaServer};
 
 // mod general;
 mod vllm;
@@ -22,6 +22,7 @@ fn rdma_transport_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // m.add_class::<RdmaClient>()?;
     // m.add_class::<Message>()?;
     m.add_class::<TensorBlock>()?;
+    m.add_class::<TensorBlocks>()?;
     m.add_class::<VllmRdmaClient>()?;
     m.add_class::<VllmRdmaServer>()?;
     Ok(())

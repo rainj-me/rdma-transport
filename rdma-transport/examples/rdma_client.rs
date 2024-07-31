@@ -67,8 +67,8 @@ pub async fn main() -> Result<()> {
             &mut cm_id,
             remote_gpu_conn,
             gpu_mr,
-            gpu_buffer,
-            0,
+            base_ptr,
+            remote_gpu_conn.get_base_ptr(),
             msg_size,
         )
         .await?;

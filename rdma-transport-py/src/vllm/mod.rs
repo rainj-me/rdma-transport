@@ -92,6 +92,10 @@ impl TensorBlocks {
     pub fn extends(&mut self, tensor_blocks: &mut TensorBlocks) {
         self.0.append(tensor_blocks.deref_mut())
     }
+
+    pub fn get_base_ptrs(&self) -> Vec<u64> {
+        self.0.deref().iter().map(|block| block.get_base_ptr()).collect()
+    }
 }
 
 impl From<&Vec<TensorBlock>> for TensorBlocks {

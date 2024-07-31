@@ -12,9 +12,8 @@ use super::{TensorBlock, TensorBlocks};
 
 pub enum Command {
     Send {
-        base_ptr: u64,
-        offset: u64,
-        size: u32,
+        local_tensor_block: TensorBlock,
+        remote_tensor_block: TensorBlock,
         req_id: Vec<u8>,
         remaining: u32,
     },
@@ -27,7 +26,6 @@ pub struct VllmRdmaClient {
     gpu_ordinal: i32,
     local_addr: SocketAddr,
     local_buffer: TensorBlocks,
-    remote_buffer: Option<TensorBlocks>,
 }
 
 #[pymethods]
@@ -47,11 +45,10 @@ impl VllmRdmaClient {
             local_buffer,
             local_addr,
             gpu_ordinal,
-            remote_buffer: None,
         }
     }
 
-    fn connect(&mut self, server_addr: String) {
+    fn connect(&mut self, server_addr: String) -> TensorBlocks {
         let server_addr = match server_addr.parse::<SocketAddr>() {
             Ok(sock_addr) => sock_addr,
             Err(e) => {
@@ -70,17 +67,17 @@ impl VllmRdmaClient {
         // self.buffer = Some((gpu_buffer.get_base_ptr(), gpu_buffer.get_size()));
         // csy: We can associate a cuda event to this buffer, or each buffer.
         // info!("client gpu_buffer: {:?}", gpu_buffer);
-        self.remote_buffer = Some(remote_gpu_buffers.values().map(Into::into).collect::<Vec<TensorBlock>>().into());
+        let tensor_blocks = remote_gpu_buffers.values().map(Into::into).collect::<Vec<TensorBlock>>().into();
 
         let _ = thread::spawn(move || {
             let rt = runtime::Builder::new_current_thread().build().unwrap();
             rt.block_on(async {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        Command::Send { base_ptr, offset, size,  req_id, remaining } if size > 0 => {
+                        Command::Send { local_tensor_block, remote_tensor_block,  req_id, remaining } if local_tensor_block.get_size() > 0 => {
                             let notification = Notification {
                                 done: 0,
-                                buffer: (base_ptr, offset, size),
+                                buffer: (remote_tensor_block.get_base_ptr(), remote_tensor_block.get_offset(), local_tensor_block.get_size()),
                                 req_id,
                                 remaining,
                             };
@@ -88,15 +85,15 @@ impl VllmRdmaClient {
                             let metadata_size = bincode::serialized_size(&notification).unwrap();
                             bincode::serialize_into(cpu_buffer.deref_mut(), &notification).unwrap();
                             // csy: We can wait on this event here or use cuLaunchHostFunc to enqueue the write routine
-                            let conn = remote_gpu_buffers.get(&base_ptr).unwrap();
-                            let (gpu_mr, gpu_buffer) = local_gpu_buffers.get_mut(&base_ptr).unwrap();
+                            let conn = remote_gpu_buffers.get(&remote_tensor_block.get_base_ptr()).unwrap();
+                            let (gpu_mr, gpu_buffer) = local_gpu_buffers.get_mut(&local_tensor_block.get_base_ptr()).unwrap();
                             if let Err(e) = rdma::write(
                                 &mut cm_id,
                                 conn,
                                 gpu_mr,
-                                gpu_buffer,
-                                offset as u32,
-                                size,
+                                local_tensor_block.get_base_ptr() + local_tensor_block.get_offset(),
+                                conn.get_base_ptr() + remote_tensor_block.get_offset(),
+                                local_tensor_block.get_size(),
                             )
                             .await
                             {
@@ -107,7 +104,7 @@ impl VllmRdmaClient {
                                 &cpu_conn,
                                 &mut cpu_mr,
                                 &mut cpu_buffer,
-                                offset as u16,
+                                0,
                                 metadata_size as u16,
                             )
                             .await
@@ -133,15 +130,13 @@ impl VllmRdmaClient {
             });
             info!("runtime end at {:?}", Instant::now());
         });
+
+        return tensor_blocks;
     }
 
-    fn get_remote_buffer(&self) -> Option<TensorBlocks> {
-        self.remote_buffer.to_owned()
-    }
-
-    async fn send(&self, base_ptr: u64, offset: u64, size: u32, req_id: Vec<u8>, remaining: u32) {
+    async fn send(&self, local_tensor_block: TensorBlock, remote_tensor_block:TensorBlock, req_id: Vec<u8>, remaining: u32) {
         if let Some(sender) = &self.sender {
-            if let Err(e) = sender.send(Command::Send { base_ptr, offset, size, req_id, remaining }).await {
+            if let Err(e) = sender.send(Command::Send { local_tensor_block, remote_tensor_block, req_id, remaining }).await {
                 error!("send error {:?}", e);
             }
         }

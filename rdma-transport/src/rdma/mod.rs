@@ -124,18 +124,18 @@ pub async fn write(
     cm_id: &mut RdmaCmId,
     conn: &Connection,
     mr: &mut IbvMr,
-    buffer: &mut GPUMemBuffer,
-    offset: u32,
+    local_buffer_addr: u64,
+    remote_buffer_addr: u64,
     size: u32,
 ) -> Result<()> {
     rdma_post_write(
         cm_id,
         Some(&mut 1),
-        buffer.get_base_ptr() + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
+        local_buffer_addr,
         size as usize,
         Some(mr),
         IBV_SEND_SIGNALED,
-        conn.get_base_ptr() + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
+        remote_buffer_addr,
         conn.get_mr_rkey(),
     )?;
 
