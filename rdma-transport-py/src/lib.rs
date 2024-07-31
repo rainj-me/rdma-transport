@@ -1,7 +1,9 @@
 use pyo3::prelude::*;
-use threading::{Message, RdmaClient, RdmaServer};
+// use general::{Message, RdmaClient, RdmaServer};
+use vllm::{TensorBlock, VllmRdmaClient, VllmRdmaServer};
 
-mod threading;
+// mod general;
+mod vllm;
 
 /// Formats the sum of two numbers as string.
 #[pyfunction]
@@ -16,8 +18,11 @@ fn rdma_transport_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
 
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
-    m.add_class::<RdmaServer>()?;
-    m.add_class::<RdmaClient>()?;
-    m.add_class::<Message>()?;
+    // m.add_class::<RdmaServer>()?;
+    // m.add_class::<RdmaClient>()?;
+    // m.add_class::<Message>()?;
+    m.add_class::<TensorBlock>()?;
+    m.add_class::<VllmRdmaClient>()?;
+    m.add_class::<VllmRdmaServer>()?;
     Ok(())
 }

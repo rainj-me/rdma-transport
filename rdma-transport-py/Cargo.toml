@@ -17,3 +17,4 @@ rdma-transport = { path = "../rdma-transport" }
 rdma-core = { path = "../rdma-core" }
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
+hex = "0"

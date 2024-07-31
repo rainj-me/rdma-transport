@@ -4,6 +4,11 @@ authors.workspace = true
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["vllm"]
+general = []
+vllm = []
+
 [dependencies]
 rdma-core-sys = { path = "../rdma-core-sys" }
 rdma-core = { path = "../rdma-core" }
@@ -18,3 +23,5 @@ tokio = {version = "1", features=["full"]}
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
 
+[dev-dependencies]
+hex = "0"

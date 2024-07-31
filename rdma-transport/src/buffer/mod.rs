@@ -11,49 +11,49 @@ pub const GPU_BUFFER_SIZE: usize = GPU_BUFFER_BASE_SIZE * OFFSET_SLOTS;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GPUMemBuffer {
-    ptr: u64,
-    capacity: usize,
+    base_ptr: u64,
+    size: usize,
 }
 
 impl GPUMemBuffer {
-    pub fn new(ptr: u64, size: usize) -> GPUMemBuffer {
+    pub fn new(base_ptr: u64, size: usize) -> GPUMemBuffer {
         GPUMemBuffer {
-            ptr,
-            capacity: size,
+            base_ptr,
+            size,
         }
     }
 
-    pub fn get_ptr(&self) -> u64 {
-        self.ptr
+    pub fn get_base_ptr(&self) -> u64 {
+        self.base_ptr
     }
 
-    pub fn get_capacity(&self) -> usize {
-        self.capacity
+    pub fn get_size(&self) -> usize {
+        self.size
     }
 }
 
 impl Deref for GPUMemBuffer {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
-        unsafe { slice::from_raw_parts(self.ptr as *mut u8, self.capacity) }
+        unsafe { slice::from_raw_parts(self.base_ptr as *mut u8, self.size) }
     }
 }
 
 impl DerefMut for GPUMemBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { slice::from_raw_parts_mut(self.ptr as *mut u8, self.capacity) }
+        unsafe { slice::from_raw_parts_mut(self.base_ptr as *mut u8, self.size) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MemBuffer {
-    buffer: Box<[u8; CPU_BUFFER_SIZE]>,
+    buffer: Box<[u8; CPU_BUFFER_BASE_SIZE]>,
 }
 
 impl MemBuffer {
     pub fn new() -> MemBuffer {
         MemBuffer {
-            buffer: Box::new([0; CPU_BUFFER_SIZE]),
+            buffer: Box::new([0; CPU_BUFFER_BASE_SIZE]),
         }
     }
 
@@ -61,7 +61,7 @@ impl MemBuffer {
         self.buffer.as_mut_ptr() as u64
     }
 
-    pub fn get_capacity(&self) -> usize {
+    pub fn get_size(&self) -> usize {
         self.buffer.len()
     }
 

@@ -3,7 +3,9 @@ use pyo3::prelude::*;
 use rdma_transport::cuda::cuda_device_to_host;
 use rdma_transport::rdma::Notification;
 use rdma_transport::{cuda, rdma, GPUMemBuffer, GPU_BUFFER_BASE_SIZE};
+use tokio::sync::mpsc::Receiver;
 use std::net::SocketAddr;
+use std::task::Poll;
 use std::thread;
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -12,7 +14,7 @@ use tokio::sync::{
     oneshot::{self, Sender},
 };
 
-use super::Message;
+use super::{TensorBlock, TensorBlocks};
 
 #[pyclass]
 pub enum Command {
@@ -20,26 +22,18 @@ pub enum Command {
 }
 
 #[pyclass]
-pub struct RdmaServer {
+pub struct VllmRdmaServer {
     cmd_sender: Option<Sender<Command>>,
-    data_reciever: Option<UnboundedReceiver<Message>>,
+    data_reciever: Option<Receiver<Vec<u8>>>,
     sock_addr: SocketAddr,
     gpu_ordinal: i32,
-}
-
-pub fn print_buffer(gpu_buffer: &GPUMemBuffer, notification: &Notification) {
-    println!("notification: {:?}", notification);
-    let (_, offset, size) = notification.buffer;
-    let mut data = Box::new([0; GPU_BUFFER_BASE_SIZE]);
-    let device_buffer = GPUMemBuffer::new(gpu_buffer.get_ptr() + offset as u64, size as usize);
-    cuda_device_to_host(&device_buffer, data.as_mut(), Some(size as usize)).unwrap();
-    println!("data: {}", String::from_utf8_lossy(&data[..]));
+    local_buffer: TensorBlocks,
 }
 
 #[pymethods]
-impl RdmaServer {
+impl VllmRdmaServer {
     #[new]
-    fn new(sock_addr: String, gpu_ordinal: i32) -> Self {
+    fn new(sock_addr: String, gpu_ordinal: i32, local_buffer: TensorBlocks) -> Self {
         let sock_addr = match sock_addr.parse::<SocketAddr>() {
             Ok(sock_addr) => sock_addr,
             Err(e) => {
@@ -48,21 +42,23 @@ impl RdmaServer {
             }
         };
 
-        RdmaServer {
+        VllmRdmaServer {
             cmd_sender: None,
             data_reciever: None,
             sock_addr,
             gpu_ordinal,
+            local_buffer,
         }
     }
 
     fn listen(&mut self) {
         let (cmd_tx, mut cmd_rx) = oneshot::channel::<Command>();
-        let (data_tx, data_rx) = mpsc::unbounded_channel::<Message>();
+        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(1024);
         self.cmd_sender = Some(cmd_tx);
         self.data_reciever = Some(data_rx);
         let mut listen_id = rdma::server_init(&self.sock_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
+        let gpu_buffers = self.local_buffer.iter().map(Into::into).collect::<Vec<GPUMemBuffer>>();
         let _ = thread::spawn(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
@@ -73,20 +69,24 @@ impl RdmaServer {
                             cuda::cuda_device_primary_ctx_release(gpu_ordinal).unwrap();
                             break;
                         }
-                        Ok(mut cm_id) = rdma::accept(&mut listen_id) => {
+                        Ok(mut cm_id) = rdma::listen(&mut listen_id) => {
                             info!("start qp handshake");
+                            let gpu_buffers = gpu_buffers.clone();
                             rt.spawn( async move {
-                                match rdma::handshake(&mut cm_id, gpu_ordinal).await {
-                                    Ok((_conn, (_gpu_mr, gpu_buffer), (mut cpu_mr, mut cpu_buffer))) =>loop {
+                                match rdma::accept(&mut cm_id, gpu_ordinal, gpu_buffers).await {
+                                    Ok((_conn, (mut cpu_mr, mut cpu_buffer), _)) =>loop {
                                         let notification = rdma::handle_notification(&mut cm_id, &mut cpu_mr, &mut cpu_buffer).await.unwrap();
-                                        info!("before clone: {}, after clone{}", cpu_buffer.get_ptr(), notification.data.as_ptr() as u64);
                                         if notification.done > 0 {
                                             info!("notifcation: {:?}" , notification);
-                                            rdma::free_gpu_membuffer(&gpu_buffer).unwrap();
                                             break;
-                                        } else {
-                                            // info!("notification: {:?}", notification);
-                                            data_tx.send(notification.into()).unwrap();
+                                        }
+                                        
+                                        if notification.remaining == 0 {
+                                            let req_id = notification.req_id.to_owned();
+                                            info!("request: {} complete!", hex::encode(&notification.req_id));
+                                            if let  Err(e) = data_tx.send(req_id).await {
+                                                error!("request: {} completion notification error: {}", hex::encode(&notification.req_id), e.to_string())
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -104,9 +104,12 @@ impl RdmaServer {
         });
     }
 
-    async fn recv_message(&mut self) -> Option<Message> {
+    fn is_complete(&mut self) -> Option<Vec<u8>> {
         if let Some(rx) = &mut self.data_reciever {
-            rx.recv().await
+            match rx.try_recv() {
+                Ok(data) => Some(data),
+                _ => None,
+            }
         } else {
             None
         }

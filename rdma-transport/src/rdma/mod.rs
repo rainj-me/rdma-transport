@@ -1,6 +1,8 @@
 mod client;
 mod server;
 
+use std::{collections::HashMap, ops::Deref, slice::Iter};
+
 use rdma_core::{
     ibverbs::{ibv_poll_cq, IbvMr},
     rdma::{rdma_post_write, rdma_post_write_with_opcode, RdmaCmId},
@@ -9,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use rdma_core_sys::{ibv_wc, IBV_SEND_SIGNALED, IBV_WC_SUCCESS};
 pub use server::{
-    accept, disconnect as server_disconnect, handle_notification, handshake, init as server_init,
+    listen, disconnect as server_disconnect, handle_notification, accept, init as server_init,
 };
 
 pub use client::{connect, disconnect as client_disconnect, init as client_init};
@@ -23,40 +25,55 @@ pub fn free_gpu_membuffer(buffer: &GPUMemBuffer) -> Result<()> {
     cuda_mem_free(&buffer).map_err(|e| e.into())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Connection {
-    pub gpu_buffer_addr: u64,
-    pub gpu_mr_rkey: u32,
-    pub cpu_buffer_addr: u64,
-    pub cpu_mr_rkey: u32,
+    base_ptr: u64,
+    mr_rkey: u32,
 }
 
-impl Default for Connection {
-    fn default() -> Self {
+impl Connection {
+    pub fn new(base_ptr: u64, mr_rkey: u32) -> Connection {
         Connection {
-            gpu_buffer_addr: 0,
-            gpu_mr_rkey: 0,
-            cpu_buffer_addr: 0,
-            cpu_mr_rkey: 0,
+            base_ptr,
+            mr_rkey
         }
+    }
+
+    pub fn get_base_ptr(&self) -> u64 {
+        self.base_ptr
+    }
+
+    pub fn get_mr_rkey(&self) -> u32 {
+        self.mr_rkey
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Connections {
+    conns: Vec<Connection>,
+}
+
+impl Connections {
+    pub fn add(&mut self, conn: Connection) {
+        self.conns.push(conn);
+    }
+}
+
+impl Deref for Connections {
+    type Target = [Connection];
+    fn deref(&self) -> &Self::Target {
+        &self.conns
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Notification {
-    pub buffer: (u64, u32, u32),
+    pub buffer: (u64, u64, u32),
     pub done: u32, // 1 is done 0 is data
-    pub data: Vec<u8>,
-}
-
-impl Default for Notification {
-    fn default() -> Self {
-        Notification {
-            done: 0,
-            buffer: (0, 0, 0),
-            data: Vec::new(),
-        }
-    }
+    pub req_id: Vec<u8>,
+    pub remaining: u32,
 }
 
 impl Notification {
@@ -83,8 +100,8 @@ pub async fn write_metadata(
         CPU_BUFFER_BASE_SIZE,
         Some(cpu_mr),
         IBV_SEND_SIGNALED,
-        conn.cpu_buffer_addr + (offset as u64 * CPU_BUFFER_BASE_SIZE as u64),
-        conn.cpu_mr_rkey,
+        conn.get_base_ptr() + (offset as u64 * CPU_BUFFER_BASE_SIZE as u64),
+        conn.get_mr_rkey(),
         rdma_core_sys::IBV_WR_RDMA_WRITE_WITH_IMM,
         imm_data,
     )?;
@@ -114,12 +131,12 @@ pub async fn write(
     rdma_post_write(
         cm_id,
         Some(&mut 1),
-        buffer.get_ptr() + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
+        buffer.get_base_ptr() + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
         size as usize,
         Some(mr),
         IBV_SEND_SIGNALED,
-        conn.gpu_buffer_addr + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
-        conn.gpu_mr_rkey,
+        conn.get_base_ptr() + (offset as u64 * GPU_BUFFER_BASE_SIZE as u64),
+        conn.get_mr_rkey(),
     )?;
 
     let mut wc = ibv_wc::default();

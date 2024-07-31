@@ -53,7 +53,7 @@ pub fn cuda_mem_alloc(size: usize) -> Result<GPUMemBuffer> {
 }
 
 pub fn cuda_mem_free(buffer: &GPUMemBuffer) -> Result<()> {
-    let ptr = buffer.get_ptr();
+    let ptr = buffer.get_base_ptr();
     if ptr as *mut u8 == ptr::null_mut() {
         return Ok(());
     }
@@ -62,8 +62,8 @@ pub fn cuda_mem_free(buffer: &GPUMemBuffer) -> Result<()> {
 }
 
 pub fn cuda_host_to_device(host_buffer: &[u8], device_buffer: &GPUMemBuffer) -> Result<()> {
-    let size = if host_buffer.len() > device_buffer.get_capacity() {
-        device_buffer.get_capacity()
+    let size = if host_buffer.len() > device_buffer.get_size() {
+        device_buffer.get_size()
     } else {
         host_buffer.len()
     };
@@ -71,7 +71,7 @@ pub fn cuda_host_to_device(host_buffer: &[u8], device_buffer: &GPUMemBuffer) -> 
     cuda_call!(
         cuMemcpyHtoD_v2,
         cuMemcpyHtoD_v2(
-            device_buffer.get_ptr(),
+            device_buffer.get_base_ptr(),
             host_buffer.as_ptr() as *const std::ffi::c_void,
             size,
         )
@@ -81,15 +81,15 @@ pub fn cuda_host_to_device(host_buffer: &[u8], device_buffer: &GPUMemBuffer) -> 
 
 pub fn cuda_device_to_host(device_buffer: &GPUMemBuffer, host_buffer: &mut [u8], size: Option<usize>) -> Result<()> {
     let size = match size {
-        Some(size) => size.min(host_buffer.len()).min(device_buffer.get_capacity()),
-        None => host_buffer.len().min(device_buffer.get_capacity())
+        Some(size) => size.min(host_buffer.len()).min(device_buffer.get_size()),
+        None => host_buffer.len().min(device_buffer.get_size())
     };
 
     cuda_call!(
         cuMemcpyDtoH_v2,
         cuMemcpyDtoH_v2(
             host_buffer.as_mut_ptr() as *mut std::ffi::c_void,
-            device_buffer.get_ptr(),
+            device_buffer.get_base_ptr(),
             size,
         )
     )

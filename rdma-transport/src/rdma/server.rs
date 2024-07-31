@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 
 use libc::AI_PASSIVE;
 
 use rdma_core::ibverbs::{IbvMr, IbvQpInitAttr};
-use rdma_core::rdma::{rdma_disconnect, RdmaAddrInfo, RdmaCmId};
+use rdma_core::rdma::{rdma_disconnect, rdma_post_write_with_opcode, RdmaAddrInfo, RdmaCmId};
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_query_qp, ibv_reg_mr},
     rdma::{
@@ -14,15 +15,15 @@ use rdma_core::{
 };
 use rdma_core_sys::{
     ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ,
-    IBV_ACCESS_REMOTE_WRITE, IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_WC_SUCCESS,
-    RDMA_PS_TCP,
+    IBV_ACCESS_REMOTE_WRITE, IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_SEND_SIGNALED,
+    IBV_WC_SUCCESS, RDMA_PS_TCP,
 };
 
 use crate::buffer::CPU_BUFFER_BASE_SIZE;
-use crate::cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx};
-use crate::{GPUMemBuffer, MemBuffer, Result, TransportErrors, GPU_BUFFER_SIZE};
+use crate::cuda::{cuda_device_primary_ctx_retain, cuda_set_current_ctx};
+use crate::{GPUMemBuffer, MemBuffer, Result, TransportErrors};
 
-use super::{Connection, Notification};
+use super::{Connection, Connections, Notification};
 
 // const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
@@ -50,14 +51,19 @@ pub fn init(bind_addr: &SocketAddr) -> Result<RdmaCmId> {
     Ok(listen_id)
 }
 
-pub async fn accept(listen_id: &mut RdmaCmId) -> Result<RdmaCmId> {
-    rdma_get_request(listen_id).map_err(|e| e.into())
+pub async fn listen(listen_id: &mut RdmaCmId) -> Result<RdmaCmId> {
+    rdma_get_request(listen_id).map_err(Into::into)
 }
 
-pub async fn handshake(
+pub async fn accept(
     cm_id: &mut RdmaCmId,
     gpu_ordinal: i32,
-) -> Result<(Connection, (IbvMr, GPUMemBuffer), (IbvMr, MemBuffer))> {
+    gpu_buffers: Vec<GPUMemBuffer>,
+) -> Result<(
+    Connection,
+    (IbvMr, MemBuffer),
+    HashMap<u64, (IbvMr, GPUMemBuffer)>,
+)> {
     let qp = cm_id.qp;
     ibv_query_qp(qp, &mut ibv_qp_attr::default(), IBV_QP_CAP as i32, None)?;
 
@@ -73,21 +79,62 @@ pub async fn handshake(
 
     let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
     cuda_set_current_ctx(&mut cu_ctx)?;
-    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(GPU_BUFFER_SIZE)?;
-    let gpu_mr = ibv_reg_mr(pd, &mut gpu_buffer, access as i32)?;
+    let mut local_gpu_buffer_map: HashMap<u64, (IbvMr, GPUMemBuffer)> = HashMap::new();
+    let mut conns = Connections::default();
+    for mut buffer in gpu_buffers.into_iter() {
+        let gpu_mr = ibv_reg_mr(pd, &mut buffer, access as i32)?;
+        conns.add(Connection::new(buffer.get_base_ptr(), gpu_mr.rkey));
+        local_gpu_buffer_map.insert(buffer.get_base_ptr(), (gpu_mr, buffer));
+    }
 
-    let mut conn_client_info = Connection::default();
+    let client_conn = establish_conn(cm_id, &mut cpu_mr, &mut cpu_buffer)?;
 
+    let size = bincode::serialized_size(&conns)
+        .map_err(|e| TransportErrors::OpsFailed("accept".to_string(), e.to_string()))?;
+    bincode::serialize_into(cpu_buffer.deref_mut(), &conns)
+        .map_err(|e| TransportErrors::OpsFailed("accept".to_string(), e.to_string()))?;
+
+    rdma_post_write_with_opcode(
+        cm_id,
+        Some(&mut 1),
+        cpu_buffer.get_ptr(),
+        CPU_BUFFER_BASE_SIZE,
+        Some(&mut cpu_mr),
+        IBV_SEND_SIGNALED,
+        client_conn.get_base_ptr(),
+        client_conn.get_mr_rkey(),
+        rdma_core_sys::IBV_WR_RDMA_WRITE_WITH_IMM,
+        size as u32,
+    )?;
+
+    let mut wc = ibv_wc::default();
+    let send_cq = cm_id.send_cq;
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
+
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "accept".to_string(),
+            format!("poll_write_comp failed with status: {:?}", wc.status),
+        ));
+    }
+
+    Ok((client_conn, (cpu_mr, cpu_buffer), local_gpu_buffer_map))
+}
+
+fn establish_conn(
+    cm_id: &mut RdmaCmId,
+    cpu_mr: &mut IbvMr,
+    cpu_buffer: &mut MemBuffer,
+) -> Result<Connection> {
+    let mut client_conn = Connection::default();
     rdma_post_recv(
         cm_id,
         None::<&mut u32>,
-        &mut conn_client_info as *mut _ as u64,
+        &mut client_conn as *mut _ as u64,
         std::mem::size_of::<Connection>(),
-        &mut cpu_mr,
+        cpu_mr,
     )?;
-
     rdma_accept(cm_id, None)?;
-
     let mut wc = ibv_wc::default();
     let recv_cq = cm_id.recv_cq;
     ibv_poll_cq(recv_cq, 1, &mut wc)?;
@@ -97,23 +144,18 @@ pub async fn handshake(
             format!("poll_recv_comp failed with status: {:?}", wc.status),
         ));
     }
-
-    let mut conn_server_info = Connection {
-        gpu_buffer_addr: gpu_buffer.get_ptr(),
-        gpu_mr_rkey: gpu_mr.rkey,
-        cpu_buffer_addr: cpu_buffer.get_ptr(),
-        cpu_mr_rkey: cpu_mr.rkey,
+    let mut server_conn = Connection {
+        base_ptr: cpu_buffer.get_ptr(),
+        mr_rkey: cpu_mr.rkey,
     };
-
     rdma_post_send(
         cm_id,
         None::<&mut u32>,
-        &mut conn_server_info,
+        &mut server_conn,
         std::mem::size_of::<Connection>(),
-        Some(&mut cpu_mr),
+        Some(cpu_mr),
         IBV_SEND_INLINE,
     )?;
-
     let mut wc = ibv_wc::default();
     let send_cq = cm_id.send_cq;
     ibv_poll_cq(send_cq, 1, &mut wc)?;
@@ -123,8 +165,7 @@ pub async fn handshake(
             format!("poll_send_comp failed with status: {:?}", wc.status),
         ));
     }
-
-    Ok((conn_client_info, (gpu_mr, gpu_buffer), (cpu_mr, cpu_buffer)))
+    Ok(client_conn)
 }
 
 pub async fn handle_notification(
@@ -137,7 +178,7 @@ pub async fn handle_notification(
         cm_id,
         None::<&mut u32>,
         cpu_buffer.get_ptr(),
-        cpu_buffer.get_capacity(),
+        cpu_buffer.get_size(),
         cpu_mr,
     )?;
 
@@ -153,12 +194,12 @@ pub async fn handle_notification(
 
     if wc.opcode == rdma_core_sys::IBV_WC_RECV_RDMA_WITH_IMM {
         let imm_data = unsafe { ntohl(wc.__bindgen_anon_1.imm_data) };
-        let offset = (imm_data & 0xFFFF0000) >> 16;
-        let size = (imm_data & 0x0000FFFF) as usize;
-        let start = (offset as usize) * CPU_BUFFER_BASE_SIZE;
+        let size = imm_data as usize;
         // println!("offset: {}, size: {}", offset, size);
-        let data = &cpu_buffer[start .. (start + size)];
-        let notification = bincode::deserialize::<Notification>(data).unwrap();
+        let notification =
+            bincode::deserialize::<Notification>(&cpu_buffer[0..size]).map_err(|e| {
+                TransportErrors::OpsFailed("handle_notification".to_string(), e.to_string())
+            })?;
         return Ok(notification);
     }
 

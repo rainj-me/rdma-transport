@@ -1,23 +1,26 @@
-use std::{net::SocketAddr, ops::DerefMut};
+use std::{collections::HashMap, net::SocketAddr, ops::DerefMut};
 
 use os_socketaddr::OsSocketAddr;
 
 use rdma_core::{
     ibverbs::{ibv_modify_qp, ibv_poll_cq, ibv_reg_mr, IbvMr, IbvQpInitAttr},
     rdma::{
-        rdma_connect, rdma_create_ep, rdma_disconnect, rdma_getaddrinfo, rdma_post_recv, rdma_post_send, RdmaAddrInfo, RdmaCmId
+        rdma_connect, rdma_create_ep, rdma_disconnect, rdma_getaddrinfo, rdma_post_recv,
+        rdma_post_send, RdmaAddrInfo, RdmaCmId,
     },
 };
 use rdma_core_sys::{
-    ibv_qp_attr, ibv_wc, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE,
-    IBV_QP_ACCESS_FLAGS, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP,
+    ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ,
+    IBV_ACCESS_REMOTE_WRITE, IBV_QP_ACCESS_FLAGS, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP,
 };
 
 use crate::{
-    buffer::GPU_BUFFER_SIZE, cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx}, GPUMemBuffer, MemBuffer, Result, TransportErrors
+    buffer::GPU_BUFFER_SIZE,
+    cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx},
+    GPUMemBuffer, MemBuffer, Result, TransportErrors,
 };
 
-use super::{write_metadata, Connection, Notification};
+use super::{write_metadata, Connection, Connections, Notification};
 
 // const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
@@ -49,7 +52,13 @@ pub fn init(server_addr: SocketAddr, local_addr: SocketAddr) -> Result<RdmaCmId>
 pub fn connect(
     cm_id: &mut RdmaCmId,
     gpu_ordinal: i32,
-) -> Result<(Connection, (IbvMr, GPUMemBuffer), (IbvMr, MemBuffer))> {
+    gpu_buffers: Vec<GPUMemBuffer>,
+) -> Result<(
+    Connection,
+    (IbvMr, MemBuffer),
+    HashMap<u64, (IbvMr, GPUMemBuffer)>,
+    HashMap<u64, Connection>,
+)> {
     let qp = cm_id.qp;
     let pd = cm_id.pd;
 
@@ -57,65 +66,110 @@ pub fn connect(
     mod_attr.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
     ibv_modify_qp(qp, &mut mod_attr, IBV_QP_ACCESS_FLAGS as i32)?;
 
+    let access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
     let mut cpu_buffer: MemBuffer = MemBuffer::default();
-    let mut cpu_mr = ibv_reg_mr(pd, cpu_buffer.deref_mut(), IBV_ACCESS_LOCAL_WRITE as i32)?;
+    let mut cpu_mr = ibv_reg_mr(pd, cpu_buffer.deref_mut(), access as i32)?;
 
     let mut cu_ctx = cuda_device_primary_ctx_retain(gpu_ordinal)?;
     cuda_set_current_ctx(&mut cu_ctx)?;
-    let mut gpu_buffer: GPUMemBuffer = cuda_mem_alloc(GPU_BUFFER_SIZE)?;
-    let gpu_mr = ibv_reg_mr(pd, &mut gpu_buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
 
-    let mut conn_server_info = Connection::default();
+    let mut local_gpu_buffer_map: HashMap<u64, (IbvMr, GPUMemBuffer)> = HashMap::new();
+    for mut buffer in gpu_buffers.into_iter() {
+        let gpu_mr = ibv_reg_mr(pd, &mut buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
+        local_gpu_buffer_map.insert(buffer.get_base_ptr(), (gpu_mr, buffer));
+    }
 
+    let server_conn = establish_conn(cm_id, &mut cpu_mr, &mut cpu_buffer)?;
+
+    // the following blocks try to recv the GPU mem conn information from server side
     rdma_post_recv(
         cm_id,
         None::<&mut u32>,
-        &mut conn_server_info as *mut _ as u64,
-        std::mem::size_of::<Connection>(),
+        cpu_buffer.get_ptr(),
+        cpu_buffer.get_size(),
         &mut cpu_mr,
     )?;
-
-    rdma_connect(cm_id, None)?;
-
-    let mut conn_client_info = Connection {
-        gpu_buffer_addr: gpu_buffer.get_ptr(),
-        gpu_mr_rkey: gpu_mr.rkey,
-        cpu_buffer_addr: cpu_buffer.get_ptr(),
-        cpu_mr_rkey: cpu_mr.rkey,
-    };
-
-    rdma_post_send(
-        cm_id,
-        None::<&mut u32>,
-        &mut conn_client_info,
-        std::mem::size_of::<Connection>(),
-        None,
-        IBV_SEND_INLINE,
-    )?;
-
-    let mut wc = ibv_wc::default();
-    let send_cq = cm_id.send_cq;
-    ibv_poll_cq(send_cq, 1, &mut wc)?;
-
-    if wc.status != IBV_WC_SUCCESS {
-        return Err(TransportErrors::OpsFailed(
-            "listen".to_string(),
-            format!("poll_send_comp failed with status: {:?}", wc.status),
-        ));
-    }
 
     let mut wc = ibv_wc::default();
     let recv_cq = cm_id.recv_cq;
     ibv_poll_cq(recv_cq, 1, &mut wc)?;
-
     if wc.status != IBV_WC_SUCCESS {
         return Err(TransportErrors::OpsFailed(
-            "listen".to_string(),
+            "connect".to_string(),
             format!("poll_recv_comp failed with status: {:?}", wc.status),
         ));
     }
 
-    Ok((conn_server_info, (gpu_mr, gpu_buffer), (cpu_mr, cpu_buffer)))
+    if wc.opcode != rdma_core_sys::IBV_WC_RECV_RDMA_WITH_IMM {
+        return Err(TransportErrors::OpsFailed(
+            "connect".to_string(),
+            "expect IBV_WR_RDMA_WRITE_WITH_IMM opcode".to_string(),
+        ));
+    }
+
+    let imm_data = unsafe { ntohl(wc.__bindgen_anon_1.imm_data) };
+    let size = imm_data as usize;
+    let data = &cpu_buffer[0..size];
+    let server_gpu_conns = bincode::deserialize::<Connections>(data)
+        .map_err(|e| TransportErrors::OpsFailed("connect".to_string(), e.to_string()))?;
+    let mut remote_gpu_conns_map: HashMap<u64, Connection> = HashMap::new();
+    for conn in server_gpu_conns.into_iter() {
+        remote_gpu_conns_map.insert(conn.base_ptr, conn.to_owned());
+    }
+
+    Ok((
+        server_conn,
+        (cpu_mr, cpu_buffer),
+        local_gpu_buffer_map,
+        remote_gpu_conns_map,
+    ))
+}
+
+fn establish_conn(
+    cm_id: &mut RdmaCmId,
+    cpu_mr: &mut IbvMr,
+    cpu_buffer: &mut MemBuffer,
+) -> Result<Connection> {
+    let mut server_conn = Connection::default();
+    rdma_post_recv(
+        cm_id,
+        None::<&mut u32>,
+        &mut server_conn as *mut _ as u64,
+        std::mem::size_of::<Connection>(),
+        cpu_mr,
+    )?;
+
+    rdma_connect(cm_id, None)?;
+
+    let mut client_conn = Connection::new(cpu_buffer.get_ptr(), cpu_mr.rkey);
+    rdma_post_send(
+        cm_id,
+        None::<&mut u32>,
+        &mut client_conn,
+        std::mem::size_of::<Connection>(),
+        None,
+        IBV_SEND_INLINE,
+    )?;
+    let mut wc = ibv_wc::default();
+    let send_cq = cm_id.send_cq;
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "establish_conn".to_string(),
+            format!("poll_send_comp failed with status: {:?}", wc.status),
+        ));
+    }
+    let mut wc = ibv_wc::default();
+    let recv_cq = cm_id.recv_cq;
+    ibv_poll_cq(recv_cq, 1, &mut wc)?;
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "establish_conn".to_string(),
+            format!("poll_recv_comp failed with status: {:?}", wc.status),
+        ));
+    }
+
+    Ok(server_conn)
 }
 
 pub async fn disconnect(
