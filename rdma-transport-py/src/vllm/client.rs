@@ -3,12 +3,13 @@ use pyo3::prelude::*;
 use rdma_transport::rdma::{self, Notification};
 use std::net::SocketAddr;
 use std::ops::DerefMut;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 use tokio::runtime;
 use tokio::sync::mpsc::{self, Sender};
 
-use super::{TensorBlock, TensorBlocks};
+use super::{CompletionReqs, TensorBlock, TensorBlocks};
 
 pub enum Command {
     Send {
@@ -26,6 +27,7 @@ pub struct VllmRdmaClient {
     gpu_ordinal: i32,
     local_addr: SocketAddr,
     local_buffer: TensorBlocks,
+    completion_reqs: Option<Arc<RwLock<CompletionReqs>>>,
 }
 
 #[pymethods]
@@ -45,6 +47,7 @@ impl VllmRdmaClient {
             local_buffer,
             local_addr,
             gpu_ordinal,
+            completion_reqs: None,
         }
     }
 
@@ -59,6 +62,8 @@ impl VllmRdmaClient {
 
         let (tx, mut rx) = mpsc::channel(1024);
         self.sender = Some(tx);
+        let completion_reqs = Arc::new(RwLock::new(CompletionReqs::new(1024)));
+        self.completion_reqs = Some(completion_reqs.clone());
         let mut cm_id = rdma::client_init(server_addr, self.local_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
         let gpu_buffers = self.local_buffer.iter().map(Into::into).collect();
@@ -67,26 +72,43 @@ impl VllmRdmaClient {
         // self.buffer = Some((gpu_buffer.get_base_ptr(), gpu_buffer.get_size()));
         // csy: We can associate a cuda event to this buffer, or each buffer.
         // info!("client gpu_buffer: {:?}", gpu_buffer);
-        let tensor_blocks = remote_gpu_buffers.values().map(Into::into).collect::<Vec<TensorBlock>>().into();
+        let tensor_blocks = remote_gpu_buffers
+            .values()
+            .map(Into::into)
+            .collect::<Vec<TensorBlock>>()
+            .into();
 
         let _ = thread::spawn(move || {
             let rt = runtime::Builder::new_current_thread().build().unwrap();
             rt.block_on(async {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        Command::Send { local_tensor_block, remote_tensor_block,  req_id, remaining } if local_tensor_block.get_size() > 0 => {
+                        Command::Send {
+                            local_tensor_block,
+                            remote_tensor_block,
+                            req_id,
+                            remaining,
+                        } if local_tensor_block.get_size() > 0 => {
                             let notification = Notification {
                                 done: 0,
-                                buffer: (remote_tensor_block.get_base_ptr(), remote_tensor_block.get_offset(), local_tensor_block.get_size()),
-                                req_id,
+                                buffer: (
+                                    remote_tensor_block.get_base_ptr(),
+                                    remote_tensor_block.get_offset(),
+                                    local_tensor_block.get_size(),
+                                ),
+                                req_id: req_id.clone(),
                                 remaining,
                             };
 
                             let metadata_size = bincode::serialized_size(&notification).unwrap();
                             bincode::serialize_into(cpu_buffer.deref_mut(), &notification).unwrap();
                             // csy: We can wait on this event here or use cuLaunchHostFunc to enqueue the write routine
-                            let conn = remote_gpu_buffers.get(&remote_tensor_block.get_base_ptr()).unwrap();
-                            let (gpu_mr, gpu_buffer) = local_gpu_buffers.get_mut(&local_tensor_block.get_base_ptr()).unwrap();
+                            let conn = remote_gpu_buffers
+                                .get(&remote_tensor_block.get_base_ptr())
+                                .unwrap();
+                            let (gpu_mr, gpu_buffer) = local_gpu_buffers
+                                .get_mut(&local_tensor_block.get_base_ptr())
+                                .unwrap();
                             if let Err(e) = rdma::write(
                                 &mut cm_id,
                                 conn,
@@ -111,6 +133,14 @@ impl VllmRdmaClient {
                             {
                                 error!("write metadata error {:?}", e);
                             }
+
+                            if remaining == 0 {
+                                let mut reqs = completion_reqs.write().unwrap();
+                                reqs.add_req(&req_id);
+                                if reqs.is_full() {
+                                    reqs.remove_first();
+                                }
+                            }
                         }
                         Command::Complete() => {
                             info!("complete");
@@ -134,11 +164,36 @@ impl VllmRdmaClient {
         return tensor_blocks;
     }
 
-    async fn send(&self, local_tensor_block: TensorBlock, remote_tensor_block:TensorBlock, req_id: Vec<u8>, remaining: u32) {
+    async fn send(
+        &self,
+        local_tensor_block: TensorBlock,
+        remote_tensor_block: TensorBlock,
+        req_id: Vec<u8>,
+        remaining: u32,
+    ) {
         if let Some(sender) = &self.sender {
-            if let Err(e) = sender.send(Command::Send { local_tensor_block, remote_tensor_block, req_id, remaining }).await {
+            if let Err(e) = sender
+                .send(Command::Send {
+                    local_tensor_block,
+                    remote_tensor_block,
+                    req_id,
+                    remaining,
+                })
+                .await
+            {
                 error!("send error {:?}", e);
             }
+        }
+    }
+
+    fn is_complete(&self, req_id: Vec<u8>) -> bool {
+        if let Some(completion_reqs) = &self.completion_reqs {
+            match completion_reqs.try_read() {
+                Ok(reqs) => reqs.is_req_complete(&req_id),
+                Err(_) => false,
+            }
+        } else {
+            false
         }
     }
 

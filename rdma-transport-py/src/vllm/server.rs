@@ -1,20 +1,14 @@
 use log::{error, info};
 use pyo3::prelude::*;
-use rdma_transport::cuda::cuda_device_to_host;
-use rdma_transport::rdma::Notification;
-use rdma_transport::{cuda, rdma, GPUMemBuffer, GPU_BUFFER_BASE_SIZE};
-use tokio::sync::mpsc::Receiver;
+use rdma_transport::{cuda, rdma, GPUMemBuffer};
 use std::net::SocketAddr;
-use std::task::Poll;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 use tokio::runtime::Runtime;
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver},
-    oneshot::{self, Sender},
-};
+use tokio::sync::oneshot::{self, Sender};
 
-use super::{TensorBlock, TensorBlocks};
+use super::{CompletionReqs,  TensorBlocks};
 
 #[pyclass]
 pub enum Command {
@@ -24,10 +18,10 @@ pub enum Command {
 #[pyclass]
 pub struct VllmRdmaServer {
     cmd_sender: Option<Sender<Command>>,
-    data_reciever: Option<Receiver<Vec<u8>>>,
     sock_addr: SocketAddr,
     gpu_ordinal: i32,
     local_buffer: TensorBlocks,
+    completion_reqs: Option<Arc<RwLock<CompletionReqs>>>,
 }
 
 #[pymethods]
@@ -44,18 +38,18 @@ impl VllmRdmaServer {
 
         VllmRdmaServer {
             cmd_sender: None,
-            data_reciever: None,
             sock_addr,
             gpu_ordinal,
             local_buffer,
+            completion_reqs: None,
         }
     }
 
     fn listen(&mut self) {
         let (cmd_tx, mut cmd_rx) = oneshot::channel::<Command>();
-        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(1024);
         self.cmd_sender = Some(cmd_tx);
-        self.data_reciever = Some(data_rx);
+        let completion_reqs = Arc::new(RwLock::new(CompletionReqs::new(1024)));
+        self.completion_reqs = Some(completion_reqs.clone());
         let mut listen_id = rdma::server_init(&self.sock_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
         let gpu_buffers = self.local_buffer.iter().map(Into::into).collect::<Vec<GPUMemBuffer>>();
@@ -63,7 +57,7 @@ impl VllmRdmaServer {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
                 loop {
-                    let data_tx = data_tx.clone();
+                    let completion_reqs = completion_reqs.clone();
                     tokio::select! {
                         Ok(Command::Complete()) = (&mut cmd_rx) => {
                             cuda::cuda_device_primary_ctx_release(gpu_ordinal).unwrap();
@@ -82,10 +76,10 @@ impl VllmRdmaServer {
                                         }
                                         
                                         if notification.remaining == 0 {
-                                            let req_id = notification.req_id.to_owned();
-                                            info!("request: {} complete!", hex::encode(&notification.req_id));
-                                            if let  Err(e) = data_tx.send(req_id).await {
-                                                error!("request: {} completion notification error: {}", hex::encode(&notification.req_id), e.to_string())
+                                            let mut reqs = completion_reqs.write().unwrap();
+                                            reqs.add_req(&notification.req_id);
+                                            if reqs.is_full() {
+                                                reqs.remove_first();
                                             }
                                         }
                                     }
@@ -104,14 +98,14 @@ impl VllmRdmaServer {
         });
     }
 
-    fn is_complete(&mut self) -> Option<Vec<u8>> {
-        if let Some(rx) = &mut self.data_reciever {
-            match rx.try_recv() {
-                Ok(data) => Some(data),
-                _ => None,
+    fn is_complete(&mut self, req_id: Vec<u8>) -> bool {
+        if let Some(completion_reqs) = &self.completion_reqs {
+            match completion_reqs.try_read() {
+                Ok(reqs) => reqs.is_req_complete(&req_id),
+                Err(_) => false,
             }
         } else {
-            None
+            false
         }
     }
 

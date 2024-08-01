@@ -1,7 +1,7 @@
 mod client;
 mod server;
 
-use std::ops::{Deref, DerefMut};
+use std::{collections::{HashSet, VecDeque}, ops::{Deref, DerefMut}};
 
 pub use client::VllmRdmaClient;
 use pyo3::{pyclass, pymethods};
@@ -10,6 +10,44 @@ use rdma_transport::{
     GPUMemBuffer,
 };
 pub use server::VllmRdmaServer;
+
+pub struct CompletionReqs {
+    fifo_reqs: VecDeque<Vec<u8>>,
+    reqs_set: HashSet<Vec<u8>>
+}
+
+impl CompletionReqs {
+    pub fn new(size: usize) -> Self {
+        let fifo_reqs = VecDeque::with_capacity(size);
+        let reqs_set = HashSet::with_capacity(size);
+        CompletionReqs {
+            fifo_reqs,
+            reqs_set
+        }
+    }
+
+    pub fn add_req(&mut self, req: &Vec<u8>) {
+        self.reqs_set.insert(req.to_vec());
+        self.fifo_reqs.push_back(req.to_vec());
+    }
+
+    pub fn remove_first(&mut self) {
+        if let Some(req) = self.fifo_reqs.pop_front() {
+            self.reqs_set.remove(&req);
+        }
+    }
+
+    pub fn is_req_complete(&self, req: &Vec<u8>) -> bool {
+        self.reqs_set.contains(req)
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.fifo_reqs.len() == self.fifo_reqs.capacity()
+    }
+
+}
+
+
 
 #[pyclass]
 #[derive(Debug, Clone, Default)]
