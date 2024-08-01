@@ -60,7 +60,7 @@ impl VllmRdmaClient {
             }
         };
 
-        let (tx, mut rx) = mpsc::channel(1024);
+        let (tx, mut rx) = mpsc::channel(1024 * 1024 * 1024);
         self.sender = Some(tx);
         let completion_reqs = Arc::new(RwLock::new(CompletionReqs::new(1024)));
         self.completion_reqs = Some(completion_reqs.clone());
@@ -164,7 +164,7 @@ impl VllmRdmaClient {
         return tensor_blocks;
     }
 
-    async fn send(
+    fn send(
         &self,
         local_tensor_block: TensorBlock,
         remote_tensor_block: TensorBlock,
@@ -173,13 +173,12 @@ impl VllmRdmaClient {
     ) {
         if let Some(sender) = &self.sender {
             if let Err(e) = sender
-                .send(Command::Send {
+                .try_send(Command::Send {
                     local_tensor_block,
                     remote_tensor_block,
                     req_id,
                     remaining,
                 })
-                .await
             {
                 error!("send error {:?}", e);
             }
