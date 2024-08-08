@@ -75,9 +75,9 @@ impl VllmRdmaServer {
                                             break;
                                         }
                                         
-                                        if notification.remaining == 0 {
+                                        if let Some(req_id) = &notification.req_id {
                                             let mut reqs = completion_reqs.write().unwrap();
-                                            reqs.add_req(&notification.req_id);
+                                            reqs.add_req(req_id);
                                             if reqs.is_full() {
                                                 reqs.remove_first();
                                             }

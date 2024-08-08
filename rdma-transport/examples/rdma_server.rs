@@ -32,8 +32,8 @@ pub async fn main() -> Result<()> {
                         break;
                     } else {
                         // println!("notification: {:?}", notification);
-                        if notification.remaining == 0 {
-                            println!("request {} complete", hex::encode(&notification.req_id));
+                        if let Some(req_id) = &notification.req_id {
+                            println!("request {} complete", hex::encode(req_id));
                         }
                         // let (_, offset, size) = notification.buffer;
                         // let mut data = Box::new([0; GPU_BUFFER_BASE_SIZE]);

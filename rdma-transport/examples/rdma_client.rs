@@ -48,21 +48,17 @@ pub async fn main() -> Result<()> {
         let (gpu_mr, gpu_buffer) = local_gpu_buffer_map.get_mut(&base_ptr).unwrap();
         let remote_base_ptr = remote_base_ptrs[gpu_buffer_index];
         let remote_gpu_conn = remote_gpu_conn_map.get(remote_base_ptr).unwrap();
-        let remaining = (i % 10) as u32;
 
         let notification = Notification {
             done: 0,
-            buffer: (base_ptr, 0, msg_size),
-            req_id: format!("request: {}", i).into_bytes(),
-            remaining,
+            req_id: Some(format!("request: {}", i).into_bytes()),
         };
 
-        
         // println!("sample data: {}", String::from_utf8_lossy(&msg[0..50]));
 
         let size = bincode::serialized_size(&notification).unwrap();
         bincode::serialize_into(cpu_buffer.deref_mut(), &notification)?;
-        
+
         rdma::write(
             &mut cm_id,
             remote_gpu_conn,
@@ -72,7 +68,15 @@ pub async fn main() -> Result<()> {
             msg_size,
         )
         .await?;
-        rdma::write_metadata(&mut cm_id, &cpu_conn, &mut cpu_mr, &mut cpu_buffer, 0, size as u16).await?;
+        rdma::write_metadata(
+            &mut cm_id,
+            &cpu_conn,
+            &mut cpu_mr,
+            &mut cpu_buffer,
+            0,
+            size as u16,
+        )
+        .await?;
     }
 
     let elapse = start.elapsed().as_millis();

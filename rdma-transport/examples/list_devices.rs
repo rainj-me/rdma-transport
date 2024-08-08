@@ -3,7 +3,7 @@ use os_socketaddr::OsSocketAddr;
 use rdma_core_sys::{
     ibv_context, ibv_device, ibv_get_device_list, rdma_bind_addr, rdma_cm_id,
     rdma_create_event_channel, rdma_create_id, rdma_destroy_event_channel, rdma_destroy_id,
-    RDMA_PS_UDP,
+    RDMA_PS_IB, RDMA_PS_UDP,
 };
 use rdma_core_sys::{ibv_get_device_guid, ibv_get_device_name};
 use std::{net::SocketAddr, ptr};
@@ -21,7 +21,8 @@ pub fn open_device_by_addr(addr: SocketAddr) -> Result<ibv_context> {
     let cm_id = unsafe {
         let context: *mut std::ffi::c_void = ptr::null_mut();
         let mut cm_id: *mut rdma_cm_id = &mut rdma_cm_id::default();
-        let res = rdma_create_id(rdma_cm_channel, &mut cm_id, context, RDMA_PS_UDP);
+        // let res = rdma_create_id(rdma_cm_channel, &mut cm_id, context, RDMA_PS_UDP);
+        let res = rdma_create_id(rdma_cm_channel, &mut cm_id, context, RDMA_PS_IB);
         println!("channel fd: {:?}", (*(*cm_id).channel).fd);
 
         if res != 0 {
@@ -55,6 +56,7 @@ pub fn open_device_by_addr(addr: SocketAddr) -> Result<ibv_context> {
         addr
     );
 
+    unsafe {rdma_destroy_event_channel(rdma_cm_channel) };
     Ok(context)
 }
 
@@ -73,18 +75,23 @@ pub fn list_devices() -> Vec<*mut ibv_device> {
 }
 
 pub fn main() -> Result<()> {
-    let devices = list_devices();
-    for device in devices {
-        let name = unsafe { std::ffi::CStr::from_ptr(ibv_get_device_name(device)) };
-
-        let guid: u64 = unsafe { ibv_get_device_guid(device) };
-
-        println!(
-            "device name: {:?}, device guid: {:x}",
-            name.to_string_lossy(),
-            guid.to_be()
-        );
-    }
-
+    open_device_by_addr("192.168.4.224:28000".parse::<SocketAddr>()?)?;
     Ok(())
 }
+
+// pub fn main() -> Result<()> {
+//     let devices = list_devices();
+//     for device in devices {
+//         let name = unsafe { std::ffi::CStr::from_ptr(ibv_get_device_name(device)) };
+
+//         let guid: u64 = unsafe { ibv_get_device_guid(device) };
+
+//         println!(
+//             "device name: {:?}, device guid: {:x}",
+//             name.to_string_lossy(),
+//             guid.to_be()
+//         );
+//     }
+
+//     Ok(())
+// }

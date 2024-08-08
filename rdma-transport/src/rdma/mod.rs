@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use rdma_core_sys::{ibv_wc, IBV_SEND_SIGNALED, IBV_WC_SUCCESS};
 pub use server::{
-    listen, disconnect as server_disconnect, handle_notification, accept, init as server_init,
+    accept, disconnect as server_disconnect, handle_notification, init as server_init, listen,
 };
 
 pub use client::{connect, disconnect as client_disconnect, init as client_init};
@@ -33,10 +33,7 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(base_ptr: u64, mr_rkey: u32) -> Connection {
-        Connection {
-            base_ptr,
-            mr_rkey
-        }
+        Connection { base_ptr, mr_rkey }
     }
 
     pub fn get_base_ptr(&self) -> u64 {
@@ -47,8 +44,6 @@ impl Connection {
         self.mr_rkey
     }
 }
-
-
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Connections {
@@ -70,10 +65,8 @@ impl Deref for Connections {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Notification {
-    pub buffer: (u64, u64, u32),
-    pub done: u32, // 1 is done 0 is data
-    pub req_id: Vec<u8>,
-    pub remaining: u32,
+    pub done: u32, // 1 is done for conn 0 is data
+    pub req_id: Option<Vec<u8>>,
 }
 
 impl Notification {

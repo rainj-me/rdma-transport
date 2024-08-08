@@ -99,13 +99,6 @@ impl From<&Connection> for TensorBlock {
     }
 }
 
-impl From<&Notification> for TensorBlock {
-    fn from(value: &Notification) -> Self {
-        let (base_ptr, offset, size) = value.buffer;
-        TensorBlock::new(base_ptr, offset, size)
-    }
-}
-
 impl Into<GPUMemBuffer> for &TensorBlock {
     fn into(self) -> GPUMemBuffer {
         GPUMemBuffer::new(self.base_ptr, self.size as usize)

@@ -15,10 +15,11 @@ pub enum Command {
     Send {
         local_tensor_block: TensorBlock,
         remote_tensor_block: TensorBlock,
-        req_id: Vec<u8>,
-        remaining: u32,
     },
-    Complete(),
+    Complete {
+        req_id: Vec<u8>,
+    },
+    Disconnect(),
 }
 
 #[pyclass]
@@ -83,25 +84,37 @@ impl VllmRdmaClient {
             rt.block_on(async {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        Command::Send {
-                            local_tensor_block,
-                            remote_tensor_block,
-                            req_id,
-                            remaining,
-                        } if local_tensor_block.get_size() > 0 => {
+                        Command::Complete { req_id } => {
                             let notification = Notification {
                                 done: 0,
-                                buffer: (
-                                    remote_tensor_block.get_base_ptr(),
-                                    remote_tensor_block.get_offset(),
-                                    local_tensor_block.get_size(),
-                                ),
-                                req_id: req_id.clone(),
-                                remaining,
+                                req_id: Some(req_id.clone()),
                             };
 
                             let metadata_size = bincode::serialized_size(&notification).unwrap();
                             bincode::serialize_into(cpu_buffer.deref_mut(), &notification).unwrap();
+
+                            let mut reqs = completion_reqs.write().unwrap();
+                            reqs.add_req(&req_id);
+                            if reqs.is_full() {
+                                reqs.remove_first();
+                            }
+                            if let Err(e) = rdma::write_metadata(
+                                &mut cm_id,
+                                &cpu_conn,
+                                &mut cpu_mr,
+                                &mut cpu_buffer,
+                                0,
+                                metadata_size as u16,
+                            )
+                            .await
+                            {
+                                error!("write complete message error {:?}", e);
+                            }
+                        }
+                        Command::Send {
+                            local_tensor_block,
+                            remote_tensor_block,
+                        } if local_tensor_block.get_size() > 0 => {
                             // csy: We can wait on this event here or use cuLaunchHostFunc to enqueue the write routine
                             let conn = remote_gpu_buffers
                                 .get(&remote_tensor_block.get_base_ptr())
@@ -121,29 +134,9 @@ impl VllmRdmaClient {
                             {
                                 error!("write data error {:?}", e);
                             }
-                            if let Err(e) = rdma::write_metadata(
-                                &mut cm_id,
-                                &cpu_conn,
-                                &mut cpu_mr,
-                                &mut cpu_buffer,
-                                0,
-                                metadata_size as u16,
-                            )
-                            .await
-                            {
-                                error!("write metadata error {:?}", e);
-                            }
-
-                            if remaining == 0 {
-                                let mut reqs = completion_reqs.write().unwrap();
-                                reqs.add_req(&req_id);
-                                if reqs.is_full() {
-                                    reqs.remove_first();
-                                }
-                            }
                         }
-                        Command::Complete() => {
-                            info!("complete");
+                        Command::Disconnect() => {
+                            info!("disconnect");
                             rdma::client_disconnect(
                                 &mut cm_id,
                                 &cpu_conn,
@@ -164,23 +157,21 @@ impl VllmRdmaClient {
         return tensor_blocks;
     }
 
-    fn send(
-        &self,
-        local_tensor_block: TensorBlock,
-        remote_tensor_block: TensorBlock,
-        req_id: Vec<u8>,
-        remaining: u32,
-    ) {
+    fn send(&self, local_tensor_block: TensorBlock, remote_tensor_block: TensorBlock) {
         if let Some(sender) = &self.sender {
-            if let Err(e) = sender
-                .try_send(Command::Send {
-                    local_tensor_block,
-                    remote_tensor_block,
-                    req_id,
-                    remaining,
-                })
-            {
-                error!("send error {:?}", e);
+            if let Err(e) = sender.try_send(Command::Send {
+                local_tensor_block,
+                remote_tensor_block,
+            }) {
+                error!("send data msg error {:?}", e);
+            }
+        }
+    }
+
+    fn complete(&self, req_id: Vec<u8>) {
+        if let Some(sender) = &self.sender {
+            if let Err(e) = sender.try_send(Command::Complete { req_id }) {
+                error!("send complete msg error {:?}", e);
             }
         }
     }
@@ -198,7 +189,7 @@ impl VllmRdmaClient {
 
     async fn shutdown(&self) {
         if let Some(sender) = self.sender.as_ref() {
-            if let Err(e) = sender.send(Command::Complete()).await {
+            if let Err(e) = sender.send(Command::Disconnect()).await {
                 error!("shutdown error {:?}", e);
             }
         }
