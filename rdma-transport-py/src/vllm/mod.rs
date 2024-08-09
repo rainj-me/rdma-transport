@@ -6,7 +6,7 @@ use std::{collections::{HashSet, VecDeque}, ops::{Deref, DerefMut}};
 pub use client::VllmRdmaClient;
 use pyo3::{pyclass, pymethods};
 use rdma_transport::{
-    rdma::{Connection, Notification},
+    rdma::Connection,
     GPUMemBuffer,
 };
 pub use server::VllmRdmaServer;

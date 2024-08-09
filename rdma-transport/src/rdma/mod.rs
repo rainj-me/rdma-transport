@@ -1,11 +1,11 @@
 mod client;
 mod server;
 
-use std::{collections::HashMap, ops::Deref, slice::Iter};
+use std::ops::Deref;
 
 use rdma_core::{
     ibverbs::{ibv_poll_cq, IbvMr},
-    rdma::{rdma_post_write, rdma_post_write_with_opcode, RdmaCmId},
+    rdma::{rdma_post_write, rdma_post_write_with_opcode, rdma_post_read, RdmaCmId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ pub use client::{connect, disconnect as client_disconnect, init as client_init};
 
 use crate::{
     buffer::CPU_BUFFER_BASE_SIZE, cuda::cuda_mem_free, GPUMemBuffer, MemBuffer, Result,
-    TransportErrors, GPU_BUFFER_BASE_SIZE,
+    TransportErrors,
 };
 
 pub fn free_gpu_membuffer(buffer: &GPUMemBuffer) -> Result<()> {
@@ -140,6 +140,39 @@ pub async fn write(
         return Err(TransportErrors::OpsFailed(
             "write".to_string(),
             format!("poll_write_comp failed with status: {:?}", wc.status),
+        ));
+    }
+
+    Ok(())
+}
+
+pub async fn read(
+    cm_id: &mut RdmaCmId,
+    conn: &Connection,
+    mr: &mut IbvMr,
+    local_buffer_addr: u64,
+    remote_buffer_addr: u64,
+    size: u32,
+) -> Result<()> {
+    rdma_post_read(
+        cm_id,
+        Some(&mut 1),
+        local_buffer_addr,
+        size as usize,
+        Some(mr),
+        IBV_SEND_SIGNALED,
+        remote_buffer_addr,
+        conn.get_mr_rkey(),
+    )?;
+
+    let mut wc = ibv_wc::default();
+    let send_cq = cm_id.send_cq;
+    ibv_poll_cq(send_cq, 1, &mut wc)?;
+
+    if wc.status != IBV_WC_SUCCESS {
+        return Err(TransportErrors::OpsFailed(
+            "read".to_string(),
+            format!("poll_read_comp failed with status: {:?}", wc.status),
         ));
     }
 

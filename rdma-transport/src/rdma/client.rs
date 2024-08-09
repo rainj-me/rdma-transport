@@ -15,8 +15,7 @@ use rdma_core_sys::{
 };
 
 use crate::{
-    buffer::GPU_BUFFER_SIZE,
-    cuda::{cuda_device_primary_ctx_retain, cuda_mem_alloc, cuda_set_current_ctx},
+    cuda::{cuda_device_primary_ctx_retain,  cuda_set_current_ctx},
     GPUMemBuffer, MemBuffer, Result, TransportErrors,
 };
 
@@ -75,7 +74,7 @@ pub fn connect(
 
     let mut local_gpu_buffer_map: HashMap<u64, (IbvMr, GPUMemBuffer)> = HashMap::new();
     for mut buffer in gpu_buffers.into_iter() {
-        let gpu_mr = ibv_reg_mr(pd, &mut buffer, IBV_ACCESS_LOCAL_WRITE as i32)?;
+        let gpu_mr = ibv_reg_mr(pd, &mut buffer, access as i32)?;
         local_gpu_buffer_map.insert(buffer.get_base_ptr(), (gpu_mr, buffer));
     }
 

@@ -173,7 +173,6 @@ pub async fn handle_notification(
     cpu_mr: &mut IbvMr,
     cpu_buffer: &mut MemBuffer,
 ) -> Result<Notification> {
-    // let mut notification = Notification::default();
     rdma_post_recv(
         cm_id,
         None::<&mut u32>,

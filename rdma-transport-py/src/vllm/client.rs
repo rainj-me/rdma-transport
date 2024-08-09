@@ -12,7 +12,13 @@ use tokio::sync::mpsc::{self, Sender};
 use super::{CompletionReqs, TensorBlock, TensorBlocks};
 
 pub enum Command {
+    // Client send only works for push mode
     Send {
+        local_tensor_block: TensorBlock,
+        remote_tensor_block: TensorBlock,
+    },
+    // Client Recv only works for pull mode
+    Recv {
         local_tensor_block: TensorBlock,
         remote_tensor_block: TensorBlock,
     },
@@ -119,10 +125,34 @@ impl VllmRdmaClient {
                             let conn = remote_gpu_buffers
                                 .get(&remote_tensor_block.get_base_ptr())
                                 .unwrap();
-                            let (gpu_mr, gpu_buffer) = local_gpu_buffers
+                            let (gpu_mr, _) = local_gpu_buffers
                                 .get_mut(&local_tensor_block.get_base_ptr())
                                 .unwrap();
                             if let Err(e) = rdma::write(
+                                &mut cm_id,
+                                conn,
+                                gpu_mr,
+                                local_tensor_block.get_base_ptr() + local_tensor_block.get_offset(),
+                                conn.get_base_ptr() + remote_tensor_block.get_offset(),
+                                local_tensor_block.get_size(),
+                            )
+                            .await
+                            {
+                                error!("write data error {:?}", e);
+                            }
+                        }
+                        Command::Recv {
+                            local_tensor_block,
+                            remote_tensor_block,
+                        } if local_tensor_block.get_size() > 0 => {
+                            // csy: We can wait on this event here or use cuLaunchHostFunc to enqueue the write routine
+                            let conn = remote_gpu_buffers
+                                .get(&remote_tensor_block.get_base_ptr())
+                                .unwrap();
+                            let (gpu_mr, _) = local_gpu_buffers
+                                .get_mut(&local_tensor_block.get_base_ptr())
+                                .unwrap();
+                            if let Err(e) = rdma::read(
                                 &mut cm_id,
                                 conn,
                                 gpu_mr,
@@ -160,6 +190,17 @@ impl VllmRdmaClient {
     fn send(&self, local_tensor_block: TensorBlock, remote_tensor_block: TensorBlock) {
         if let Some(sender) = &self.sender {
             if let Err(e) = sender.try_send(Command::Send {
+                local_tensor_block,
+                remote_tensor_block,
+            }) {
+                error!("send data msg error {:?}", e);
+            }
+        }
+    }
+
+    fn recv(&self, local_tensor_block: TensorBlock, remote_tensor_block: TensorBlock) {
+        if let Some(sender) = &self.sender {
+            if let Err(e) = sender.try_send(Command::Recv {
                 local_tensor_block,
                 remote_tensor_block,
             }) {

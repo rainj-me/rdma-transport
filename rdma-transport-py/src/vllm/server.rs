@@ -8,11 +8,11 @@ use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot::{self, Sender};
 
-use super::{CompletionReqs,  TensorBlocks};
+use super::{CompletionReqs, TensorBlocks};
 
 #[pyclass]
 pub enum Command {
-    Complete(),
+    Disconnect(),
 }
 
 #[pyclass]
@@ -59,7 +59,7 @@ impl VllmRdmaServer {
                 loop {
                     let completion_reqs = completion_reqs.clone();
                     tokio::select! {
-                        Ok(Command::Complete()) = (&mut cmd_rx) => {
+                        Ok(Command::Disconnect()) = (&mut cmd_rx) => {
                             cuda::cuda_device_primary_ctx_release(gpu_ordinal).unwrap();
                             break;
                         }
@@ -111,7 +111,7 @@ impl VllmRdmaServer {
 
     fn shutdown(&mut self) {
         if let Some(sender) = self.cmd_sender.take() {
-            let _ = sender.send(Command::Complete());
+            let _ = sender.send(Command::Disconnect());
         }
     }
 }
