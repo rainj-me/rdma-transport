@@ -12,6 +12,7 @@ use rdma_transport::GPU_BUFFER_BASE_SIZE;
 pub async fn main() -> Result<()> {
     let server_addr = "192.168.14.224:23460".parse::<SocketAddr>()?;
     let local_addr = "192.168.14.224:23461".parse::<SocketAddr>()?;
+    //  let server_addr = "[ffff::ffff:ffff:ffff:ffff]:32768".parse::<SocketAddr>()?;
     let gpu_ordinal = 4;
     let gpu_buffer_count = 4;
 
@@ -25,6 +26,7 @@ pub async fn main() -> Result<()> {
     }
 
     let mut cm_id = rdma::client_init(server_addr, Some(local_addr))?;
+    // let mut cm_id = rdma::client_init(server_addr, None)?;
 
     let (cpu_conn, (mut cpu_mr, mut cpu_buffer), mut local_gpu_buffer_map, remote_gpu_conn_map) =
         rdma::connect(&mut cm_id, gpu_ordinal, local_gpu_buffers.clone())?;

@@ -7,6 +7,7 @@ use rdma_transport::{rdma, GPUMemBuffer, GPU_BUFFER_BASE_SIZE};
 #[tokio::main]
 pub async fn main() -> Result<()> {
     let bind_addr = "192.168.14.224:23460".parse::<SocketAddr>()?;
+    // let bind_addr = "[::0]:32768".parse::<SocketAddr>()?;
     let gpu_ordinal = 4;
     let gpu_buffer_count = 4;
 
