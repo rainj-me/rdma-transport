@@ -71,7 +71,7 @@ impl VllmRdmaClient {
         self.sender = Some(tx);
         let completion_reqs = Arc::new(RwLock::new(CompletionReqs::new(1024)));
         self.completion_reqs = Some(completion_reqs.clone());
-        let mut cm_id = rdma::client_init(server_addr, self.local_addr).unwrap();
+        let mut cm_id = rdma::client_init(server_addr, Some(self.local_addr)).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
         let gpu_buffers = self.local_buffer.iter().map(Into::into).collect();
         let (cpu_conn, (mut cpu_mr, mut cpu_buffer), mut local_gpu_buffers, remote_gpu_buffers) =

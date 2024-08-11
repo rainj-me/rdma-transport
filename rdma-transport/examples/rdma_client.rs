@@ -24,7 +24,7 @@ pub async fn main() -> Result<()> {
         local_gpu_buffers.push(cuda_mem_alloc(GPU_BUFFER_BASE_SIZE)?);
     }
 
-    let mut cm_id = rdma::client_init(server_addr, local_addr)?;
+    let mut cm_id = rdma::client_init(server_addr, Some(local_addr))?;
 
     let (cpu_conn, (mut cpu_mr, mut cpu_buffer), mut local_gpu_buffer_map, remote_gpu_conn_map) =
         rdma::connect(&mut cm_id, gpu_ordinal, local_gpu_buffers.clone())?;

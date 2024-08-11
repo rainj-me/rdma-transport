@@ -23,13 +23,15 @@ use super::{write_metadata, Connection, Connections, Notification};
 
 // const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
-pub fn init(server_addr: SocketAddr, local_addr: SocketAddr) -> Result<RdmaCmId> {
-    let mut src_addr: OsSocketAddr = local_addr.into();
+pub fn init(server_addr: SocketAddr, local_addr: Option<SocketAddr>) -> Result<RdmaCmId> {
 
     let mut hints = RdmaAddrInfo::default();
     hints.ai_port_space = RDMA_PS_TCP as i32;
-    hints.ai_src_addr = src_addr.as_mut_ptr();
-    hints.ai_src_len = src_addr.len();
+    if let Some(local_addr) = local_addr {
+        let mut src_addr: OsSocketAddr = local_addr.into();
+        hints.ai_src_addr = src_addr.as_mut_ptr();
+        hints.ai_src_len = src_addr.len();
+    }
 
     let mut addr_info = rdma_getaddrinfo(
         &server_addr.ip().to_string(),
