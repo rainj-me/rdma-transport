@@ -14,9 +14,7 @@ use rdma_core::{
     },
 };
 use rdma_core_sys::{
-    ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ,
-    IBV_ACCESS_REMOTE_WRITE, IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_SEND_SIGNALED,
-    IBV_WC_SUCCESS, RDMA_PS_TCP,
+    ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE, IBV_QPT_RC, IBV_QP_ACCESS_FLAGS, IBV_QP_CAP, IBV_SEND_INLINE, IBV_SEND_SIGNALED, IBV_WC_SUCCESS, RDMA_PS_TCP
 };
 
 use crate::buffer::CPU_BUFFER_BASE_SIZE;
@@ -43,6 +41,7 @@ pub fn init(bind_addr: &SocketAddr) -> Result<RdmaCmId> {
     qp_init_attr.cap.max_recv_wr = 1;
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
+    qp_init_attr.qp_type = IBV_QPT_RC;
     qp_init_attr.sq_sig_all = 1;
 
     let mut listen_id = rdma_create_ep(&mut addr_info, None, Some(&mut qp_init_attr))?;

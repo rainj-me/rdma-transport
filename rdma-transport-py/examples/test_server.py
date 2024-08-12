@@ -1,4 +1,4 @@
-from rdma_transport import RdmaServer
+from rdma_transport import VllmRdmaServer as RdmaServer, TensorBlocks, TensorBlock
 import logging
 import sys
 import time
@@ -26,7 +26,14 @@ async def main():
 
     torch.cuda.init()
 
-    dt = RdmaServer(server_addr, gpu_ordinal)
+    size = 1024 * 1024
+    tensors = torch.empty(size, dtype=torch.int8)
+
+    local_buffers = TensorBlocks()
+    buffer = TensorBlock(tensors.data_ptr(), 0, size)
+    local_buffers.add(buffer)
+
+    dt = RdmaServer(server_addr, gpu_ordinal, local_buffers)
     dt.listen()
 
     def signal_handler(sig, frame):
@@ -34,16 +41,14 @@ async def main():
         # Perform any cleanup actions here
         dt.shutdown()
         print('Cleanup done. Exiting.')
-        time.sleep(5)
+        time.sleep(1)
         sys.exit(0)
 
     # Register the signal handler for SIGINT
     signal.signal(signal.SIGINT, signal_handler)
 
-    for i in range(1, 100):
-        print("try to recv msg")
-        msg = await dt.recv_message()
-        print(f"buffer: {msg.get_buffer()}, data: {msg.get_data()}")
+    while True:
+        time.sleep(1)
 
 
 if __name__ == "__main__":

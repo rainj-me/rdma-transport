@@ -32,7 +32,6 @@ pub enum Command {
 pub struct VllmRdmaClient {
     sender: Option<Sender<Command>>,
     gpu_ordinal: i32,
-    local_addr: SocketAddr,
     local_buffer: TensorBlocks,
     completion_reqs: Option<Arc<RwLock<CompletionReqs>>>,
 }
@@ -40,19 +39,10 @@ pub struct VllmRdmaClient {
 #[pymethods]
 impl VllmRdmaClient {
     #[new]
-    fn new(local_addr: String, gpu_ordinal: i32, local_buffer: TensorBlocks) -> Self {
-        let local_addr = match local_addr.parse::<SocketAddr>() {
-            Ok(sock_addr) => sock_addr,
-            Err(e) => {
-                error!("parse socket address failed: {:?}", e);
-                panic!();
-            }
-        };
-
+    fn new(gpu_ordinal: i32, local_buffer: TensorBlocks) -> Self {
         VllmRdmaClient {
             sender: None,
             local_buffer,
-            local_addr,
             gpu_ordinal,
             completion_reqs: None,
         }
@@ -71,7 +61,7 @@ impl VllmRdmaClient {
         self.sender = Some(tx);
         let completion_reqs = Arc::new(RwLock::new(CompletionReqs::new(1024)));
         self.completion_reqs = Some(completion_reqs.clone());
-        let mut cm_id = rdma::client_init(server_addr, Some(self.local_addr)).unwrap();
+        let mut cm_id = rdma::client_init(server_addr).unwrap();
         let gpu_ordinal = self.gpu_ordinal;
         let gpu_buffers = self.local_buffer.iter().map(Into::into).collect();
         let (cpu_conn, (mut cpu_mr, mut cpu_buffer), mut local_gpu_buffers, remote_gpu_buffers) =
@@ -228,9 +218,9 @@ impl VllmRdmaClient {
         }
     }
 
-    async fn shutdown(&self) {
-        if let Some(sender) = self.sender.as_ref() {
-            if let Err(e) = sender.send(Command::Disconnect()).await {
+    fn shutdown(&self) {
+        if let Some(sender) = &self.sender {
+            if let Err(e) = sender.try_send(Command::Disconnect()) {
                 error!("shutdown error {:?}", e);
             }
         }

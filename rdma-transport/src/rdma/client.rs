@@ -10,8 +10,7 @@ use rdma_core::{
     },
 };
 use rdma_core_sys::{
-    ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ,
-    IBV_ACCESS_REMOTE_WRITE, IBV_QP_ACCESS_FLAGS, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP,
+    ibv_qp_attr, ibv_wc, ntohl, IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE, IBV_QPT_RC, IBV_QP_ACCESS_FLAGS, IBV_SEND_INLINE, IBV_WC_SUCCESS, RDMA_PS_TCP
 };
 
 use crate::{
@@ -23,15 +22,10 @@ use super::{write_metadata, Connection, Connections, Notification};
 
 // const BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
-pub fn init(server_addr: SocketAddr, local_addr: Option<SocketAddr>) -> Result<RdmaCmId> {
+pub fn init(server_addr: SocketAddr) -> Result<RdmaCmId> {
 
     let mut hints = RdmaAddrInfo::default();
     hints.ai_port_space = RDMA_PS_TCP as i32;
-    if let Some(local_addr) = local_addr {
-        let mut src_addr: OsSocketAddr = local_addr.into();
-        hints.ai_src_addr = src_addr.as_mut_ptr();
-        hints.ai_src_len = src_addr.len();
-    }
 
     let mut addr_info = rdma_getaddrinfo(
         &server_addr.ip().to_string(),
@@ -45,6 +39,7 @@ pub fn init(server_addr: SocketAddr, local_addr: Option<SocketAddr>) -> Result<R
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
     qp_init_attr.cap.max_inline_data = 16;
+    qp_init_attr.qp_type = IBV_QPT_RC;
     qp_init_attr.sq_sig_all = 1;
     let cm_id = rdma_create_ep(&mut addr_info, None, Some(&mut qp_init_attr))?;
     Ok(cm_id)
